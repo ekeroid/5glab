@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package edgevision;
+
+service InferenceService {
+  rpc Infer (InferRequest) returns (InferResponse);
+  rpc Health (HealthRequest) returns (HealthResponse);
+}
+
+message InferRequest {
+  bytes jpeg = 1;
+  float confidence_threshold = 2;
+}
+
+message InferResponse {
+  repeated Detection detections = 1;
+  float latency_ms = 2;
+}
+
+message Detection {
+  string label = 1;
+  float confidence = 2;
+  BBox bbox = 3;
+}
+
+message BBox {
+  float x1 = 1;
+  float y1 = 2;
+  float x2 = 3;
+  float y2 = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool live = 1;
+  string status = 2;
+}

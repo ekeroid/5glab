@@ -1,0 +1,5 @@
+# Namespace for all EdgeVision resources — NEF-shim, per-tenant Triton deployments
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: edgevision

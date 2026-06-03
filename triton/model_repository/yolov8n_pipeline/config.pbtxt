@@ -1,0 +1,48 @@
+name: "yolov8n_pipeline"
+platform: "ensemble"
+max_batch_size: 0
+
+input [
+  {
+    name: "IMAGE_BYTES"
+    data_type: TYPE_UINT8
+    dims: [-1]
+  }
+]
+
+output [
+  {
+    name: "output0"
+    data_type: TYPE_FP32
+    dims: [84, 8400]
+  }
+]
+
+ensemble_scheduling {
+  step [
+    {
+      model_name: "preprocess"
+      model_version: -1
+      input_map {
+        key: "IMAGE_BYTES"
+        value: "IMAGE_BYTES"
+      }
+      output_map {
+        key: "images"
+        value: "images"
+      }
+    },
+    {
+      model_name: "yolov8n"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "images"
+      }
+      output_map {
+        key: "output0"
+        value: "output0"
+      }
+    }
+  ]
+}

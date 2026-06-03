@@ -1,0 +1,43 @@
+# NEF-shim deployment — runs the CAMARA API shim that orchestrates
+# per-tenant Triton GPU instances via the Kubernetes API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nef-shim
+  namespace: edgevision
+  labels:
+    app: nef-shim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nef-shim
+  template:
+    metadata:
+      labels:
+        app: nef-shim
+    spec:
+      serviceAccountName: nef-shim
+      containers:
+        - name: nef-shim
+          image: ghcr.io/placeholder/edgevision-nef:latest
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: CAMARA_NAMESPACE
+              value: "edgevision"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: EXTERNAL_HOSTNAME
+              value: "camara.5glab.control.lth.se"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15

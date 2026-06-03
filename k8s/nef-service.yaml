@@ -1,0 +1,16 @@
+# ClusterIP service for the NEF-shim — targeted by the HTTPRoute
+apiVersion: v1
+kind: Service
+metadata:
+  name: nef-shim
+  namespace: edgevision
+  labels:
+    app: nef-shim
+spec:
+  type: ClusterIP
+  selector:
+    app: nef-shim
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

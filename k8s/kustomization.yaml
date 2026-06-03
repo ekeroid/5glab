@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - nef-serviceaccount.yaml
+  - nef-deployment-inline.yaml
+  - nef-service.yaml
+  - nef-httproute.yaml
+
+configMapGenerator:
+  - name: triton-model-config
+    namespace: edgevision
+    files:
+      - config.pbtxt
+      - export_yolov8_onnx.py
+  - name: infer-sidecar-code
+    namespace: edgevision
+    files:
+      - main.py=infer_sidecar_main.py
+
+generatorOptions:
+  disableNameSuffixHash: true

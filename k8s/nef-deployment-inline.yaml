@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nef-shim
+  namespace: edgevision
+  labels:
+    app: nef-shim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nef-shim
+  template:
+    metadata:
+      labels:
+        app: nef-shim
+    spec:
+      serviceAccountName: nef-shim
+      initContainers:
+        - name: install-deps
+          image: python:3.12-slim
+          command:
+            - sh
+            - -c
+            - pip install --no-cache-dir -r /src/requirements.txt -t /app/site-packages
+          volumeMounts:
+            - name: code
+              mountPath: /src
+            - name: app
+              mountPath: /app
+      containers:
+        - name: nef-shim
+          image: python:3.12-slim
+          command:
+            - sh
+            - -c
+            - |
+              cp /src/*.py /app/ && cd /app &&
+              PYTHONPATH=/app/site-packages python -m uvicorn main:app --host 0.0.0.0 --port 8000
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: CAMARA_NAMESPACE
+              value: "edgevision"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: EXTERNAL_HOSTNAME
+              value: "camara.5glab.control.lth.se"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 5
+          volumeMounts:
+            - name: code
+              mountPath: /src
+            - name: app
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: nef-shim-code
+        - name: app
+          emptyDir: {}

@@ -1,0 +1,23 @@
+services:
+  camera-api:
+    build: ./camera-api
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./camera-api/images:/app/images:ro
+
+  client:
+    build: ./client
+    environment:
+      - MODE=local
+      - CAMERA_API_URL=http://camera-api:8081
+      - FRAME_INTERVAL_MS=500
+      - CONFIDENCE_THRESHOLD=0.35
+      - OUTPUT_DIR=/output
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./output:/output
+    ports:
+      - "8080:8080"
+    depends_on:
+      - camera-api

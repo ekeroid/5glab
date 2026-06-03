@@ -1,0 +1,5 @@
+fastapi>=0.111
+uvicorn>=0.29
+numpy>=1.26
+opencv-python-headless>=4.9
+tritonclient[grpc]>=2.40

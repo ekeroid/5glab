@@ -1,0 +1,7 @@
+services:
+  client:
+    environment:
+      - MODE=edge
+      - CAMERA_API_URL=http://camera-api:8081
+      - CAMARA_API_URL=http://camara.5glab.control.lth.se
+      - FRAME_INTERVAL_MS=500

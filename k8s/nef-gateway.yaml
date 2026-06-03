@@ -1,0 +1,14 @@
+# Gateway for EdgeVision — listens on port 80 for the CAMARA hostname
+# GatewayClass 'eg' is Envoy Gateway (installed on this cluster)
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edgevision-gateway
+  namespace: edgevision
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      hostname: camara.5glab.control.lth.se

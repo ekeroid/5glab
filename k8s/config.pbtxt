@@ -1,0 +1,30 @@
+name: "yolov8n"
+backend: "onnxruntime"
+max_batch_size: 4
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    dims: [3, 640, 640]
+  }
+]
+
+output [
+  {
+    name: "output0"
+    data_type: TYPE_FP32
+    dims: [84, -1]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [1, 2, 4]
+}
+
+instance_group [
+  {
+    kind: KIND_GPU
+    count: 1
+  }
+]
