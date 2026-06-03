@@ -13,7 +13,7 @@ import socket
 
 import requests
 
-from config import CAMARA_API_URL, CAMARA_HOST_HEADER, CAMARA_PROXY_BASE_URL
+from config import CAMARA_API_URL, CAMARA_HOST_HEADER, CAMARA_PROXY_BASE_URL, EDGE_TRANSPORT
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ def get_instance_status(app_instance_id: str) -> str:
 
 
 def get_endpoint(app_instance_id: str) -> str:
-    """GET /application-endpoint-discovery/v0/endpoints — get gRPC target for inference."""
+    """GET /application-endpoint-discovery/v0/endpoints — get inference endpoint."""
     url = f"{CAMARA_API_URL}/application-endpoint-discovery/v0/endpoints"
     params = {"appInstanceId": app_instance_id}
 
@@ -142,9 +142,14 @@ def get_endpoint(app_instance_id: str) -> str:
     resp.raise_for_status()
     data = resp.json()
 
-    grpc_endpoint = data.get("grpcEndpoint", data.get("endpoint"))
-    logger.info(f"[CAMARA] gRPC endpoint discovered: {grpc_endpoint}")
-    return grpc_endpoint
+    if EDGE_TRANSPORT == "grpc":
+        endpoint = data.get("grpcEndpoint", data.get("endpoint"))
+        logger.info(f"[CAMARA] gRPC endpoint: {endpoint}")
+    else:
+        endpoint = data.get("httpEndpoint", data.get("endpoint"))
+        logger.info(f"[CAMARA] HTTP endpoint: {endpoint}")
+
+    return endpoint
 
 
 def terminate_app(app_instance_id: str):

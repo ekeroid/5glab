@@ -12,6 +12,7 @@ using a ServiceAccount with cluster-scoped permissions.
 """
 
 import logging
+import threading
 
 from fastapi import FastAPI, Request
 
@@ -21,6 +22,7 @@ from discovery import router as discovery_router
 from app_management import router as app_management_router, _instances
 from endpoint_discovery import router as endpoint_discovery_router, set_instances_ref
 from proxy import router as proxy_router, init_proxy_client, close_proxy_client
+from grpc_proxy import start_grpc_proxy, stop_grpc_proxy
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL),
@@ -40,16 +42,18 @@ app.include_router(proxy_router)
 
 @app.on_event("startup")
 async def startup():
-    """Initialize k8s client and proxy HTTP client."""
+    """Initialize k8s client, proxy HTTP client, and gRPC proxy."""
     k8s_manager.init()
     set_instances_ref(_instances)
     await init_proxy_client()
+    threading.Thread(target=start_grpc_proxy, daemon=True).start()
     logger.info(f"NEF-shim started (namespace={config.CAMARA_NAMESPACE})")
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    """Clean up proxy client."""
+    """Clean up proxy client and gRPC proxy."""
+    stop_grpc_proxy()
     await close_proxy_client()
     logger.info("NEF-shim stopped")
 

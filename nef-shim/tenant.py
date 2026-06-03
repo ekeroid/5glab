@@ -12,7 +12,10 @@ from fastapi import Request
 
 
 def get_tenant_id(request: Request) -> str:
-    """Get the raw tenant identifier (source IP)."""
+    """Get the raw tenant identifier (source IP via x-forwarded-for or peer)."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
     return request.client.host
 
 

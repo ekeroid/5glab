@@ -123,6 +123,7 @@ def main():
     # Edge setup
     if config.MODE == "edge":
         logger.info(f"  CAMARA API: {config.CAMARA_API_URL}")
+        logger.info(f"  Transport: {config.EDGE_TRANSPORT.upper()}")
         _app_instance_id, _triton_proxy_url = _setup_edge()
 
     # Main processing loop
@@ -140,9 +141,10 @@ def main():
             # Run inference
             infer_start = time.perf_counter()
             if config.MODE == "edge" and _triton_proxy_url:
-                detections = detector_remote.detect(jpeg_bytes, _triton_proxy_url)
+                detections, server_ms = detector_remote.detect(jpeg_bytes, _triton_proxy_url)
             else:
                 detections = detector_local.detect(jpeg_bytes)
+                server_ms = None
             infer_ms = (time.perf_counter() - infer_start) * 1000
 
             # Annotate and save
@@ -156,9 +158,12 @@ def main():
             )
 
             frame_num += 1
+            latency_info = f"{infer_ms:.0f}ms"
+            if server_ms:
+                latency_info += f" (server: {server_ms:.0f}ms)"
             logger.info(
                 f"Frame {frame_num:04d} | {config.MODE.upper()} | "
-                f"{infer_ms:.0f}ms | {len(detections)} detections | {frame_source}"
+                f"{latency_info} | {len(detections)} detections | {frame_source}"
             )
 
         except requests.exceptions.ConnectionError:

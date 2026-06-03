@@ -1,9 +1,8 @@
 """
-Remote detector — YOLOv8n inference via gRPC to edge inference server.
+Remote detector — YOLOv8n inference via edge proxy (gRPC or HTTP).
 
-Used when MODE=edge. Sends raw JPEG over gRPC binary stream.
-Preprocessing (resize, normalize, NCHW) and Triton communication happen
-server-side — only ~200KB JPEG goes over the wire, not a 5MB tensor.
+Used when MODE=edge. Sends raw JPEG to the NEF proxy which forwards
+to the Triton sidecar. Transport is selected by EDGE_TRANSPORT config.
 """
 
 import logging
@@ -11,23 +10,68 @@ import time
 import sys
 import os
 
-import grpc
+import requests
 
 sys.path.insert(0, os.path.dirname(__file__))
-import infer_pb2
-import infer_pb2_grpc
 
-from config import CONFIDENCE_THRESHOLD
+from config import CONFIDENCE_THRESHOLD, EDGE_TRANSPORT
 
 logger = logging.getLogger(__name__)
 
-_channel: grpc.Channel | None = None
-_stub: infer_pb2_grpc.InferenceServiceStub | None = None
+# --- HTTP transport ---
+
+_session: requests.Session | None = None
 
 
-def _get_stub(grpc_target: str) -> infer_pb2_grpc.InferenceServiceStub:
+def _get_session() -> requests.Session:
+    global _session
+    if _session is None:
+        _session = requests.Session()
+    return _session
+
+
+def _detect_http(jpeg_bytes: bytes, endpoint_url: str, max_retries: int) -> tuple[list[dict], float]:
+    session = _get_session()
+    infer_url = f"{endpoint_url}/infer"
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            resp = session.post(
+                infer_url,
+                data=jpeg_bytes,
+                headers={
+                    "Content-Type": "image/jpeg",
+                    "X-Confidence-Threshold": str(CONFIDENCE_THRESHOLD),
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("detections", []), data.get("latency_ms", 0.0)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_error = e
+            logger.warning(f"HTTP inference attempt {attempt + 1}/{max_retries}: {type(e).__name__}")
+        except Exception as e:
+            last_error = e
+            logger.warning(f"HTTP inference attempt {attempt + 1}/{max_retries} failed: {e}")
+        if attempt < max_retries - 1:
+            time.sleep(1)
+
+    raise RuntimeError(f"HTTP inference failed after {max_retries} attempts: {last_error}")
+
+
+# --- gRPC transport ---
+
+_channel = None
+_stub = None
+
+
+def _get_stub(grpc_target: str):
     global _channel, _stub
     if _stub is None:
+        import grpc
+        import infer_pb2_grpc
         _channel = grpc.insecure_channel(
             grpc_target,
             options=[
@@ -40,15 +84,22 @@ def _get_stub(grpc_target: str) -> infer_pb2_grpc.InferenceServiceStub:
     return _stub
 
 
-def detect(jpeg_bytes: bytes, triton_url: str, max_retries: int = 3) -> tuple[list[dict], float]:
-    """
-    Run YOLOv8n inference via gRPC.
+def _reset_channel():
+    global _channel, _stub
+    if _channel:
+        try:
+            _channel.close()
+        except Exception:
+            pass
+    _channel = None
+    _stub = None
 
-    triton_url: gRPC target (e.g. "localhost:50051" or "130.235.32.171:50051")
-    Returns (detections, server_latency_ms).
-    """
-    stub = _get_stub(triton_url)
 
+def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple[list[dict], float]:
+    import grpc
+    import infer_pb2
+
+    stub = _get_stub(grpc_target)
     request = infer_pb2.InferRequest(
         jpeg=jpeg_bytes,
         confidence_threshold=CONFIDENCE_THRESHOLD,
@@ -57,7 +108,7 @@ def detect(jpeg_bytes: bytes, triton_url: str, max_retries: int = 3) -> tuple[li
     last_error = None
     for attempt in range(max_retries):
         try:
-            response = stub.Infer(request, timeout=10.0)
+            response = stub.Infer(request, timeout=15.0)
             detections = []
             for det in response.detections:
                 detections.append({
@@ -68,7 +119,7 @@ def detect(jpeg_bytes: bytes, triton_url: str, max_retries: int = 3) -> tuple[li
             return detections, response.latency_ms
         except grpc.RpcError as e:
             last_error = e
-            logger.warning(f"gRPC inference attempt {attempt + 1}/{max_retries} failed: {e.code()} {e.details()}")
+            logger.warning(f"gRPC inference attempt {attempt + 1}/{max_retries}: {e.code()} {e.details()}")
             if attempt < max_retries - 1:
                 time.sleep(1)
                 _reset_channel()
@@ -82,22 +133,34 @@ def detect(jpeg_bytes: bytes, triton_url: str, max_retries: int = 3) -> tuple[li
     raise RuntimeError(f"gRPC inference failed after {max_retries} attempts: {last_error}")
 
 
-def health_check(grpc_target: str) -> bool:
-    """Check if the inference server is healthy via gRPC."""
-    try:
-        stub = _get_stub(grpc_target)
-        response = stub.Health(infer_pb2.HealthRequest(), timeout=3.0)
-        return response.live
-    except Exception:
-        return False
+# --- Public API ---
+
+def detect(jpeg_bytes: bytes, endpoint: str, max_retries: int = 3) -> tuple[list[dict], float]:
+    """
+    Run inference via the configured transport.
+
+    endpoint: for HTTP this is the base URL, for gRPC this is host:port.
+    """
+    if EDGE_TRANSPORT == "grpc":
+        return _detect_grpc(jpeg_bytes, endpoint, max_retries)
+    return _detect_http(jpeg_bytes, endpoint, max_retries)
 
 
-def _reset_channel():
-    global _channel, _stub
-    if _channel:
+def health_check(endpoint: str) -> bool:
+    """Check if the inference server is healthy."""
+    if EDGE_TRANSPORT == "grpc":
         try:
-            _channel.close()
+            import grpc
+            import infer_pb2
+            stub = _get_stub(endpoint)
+            response = stub.Health(infer_pb2.HealthRequest(), timeout=3.0)
+            return response.live
         except Exception:
-            pass
-    _channel = None
-    _stub = None
+            return False
+    else:
+        try:
+            session = _get_session()
+            resp = session.get(f"{endpoint}/health", timeout=3)
+            return resp.status_code == 200
+        except Exception:
+            return False

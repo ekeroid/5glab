@@ -133,7 +133,7 @@ def _create_deployment(tenant_slug: str):
                                     path="/health",
                                     port=8080,
                                 ),
-                                initial_delay_seconds=60,
+                                initial_delay_seconds=180,
                                 period_seconds=5,
                             ),
                             liveness_probe=client.V1Probe(
@@ -141,7 +141,7 @@ def _create_deployment(tenant_slug: str):
                                     path="/health",
                                     port=8080,
                                 ),
-                                initial_delay_seconds=120,
+                                initial_delay_seconds=300,
                                 period_seconds=10,
                             ),
                         ),

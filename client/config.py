@@ -9,6 +9,7 @@ import os
 
 
 MODE = os.getenv("MODE", "local")  # local | edge
+EDGE_TRANSPORT = os.getenv("EDGE_TRANSPORT", "grpc")  # grpc | http
 CAMERA_API_URL = os.getenv("CAMERA_API_URL", "http://camera-api:8081")
 CAMARA_API_URL = os.getenv("CAMARA_API_URL", "http://camara.5glab.control.lth.se")
 CAMARA_HOST_HEADER = os.getenv("CAMARA_HOST_HEADER", "")

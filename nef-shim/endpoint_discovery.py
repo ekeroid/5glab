@@ -51,15 +51,13 @@ async def get_endpoint(
     if instance["status"] != "ready":
         raise HTTPException(409, f"Instance not ready (status: {instance['status']})")
 
-    nodeport = k8s_manager.get_service_grpc_nodeport(tenant_slug)
-    if nodeport:
-        grpc_endpoint = f"{EXTERNAL_HOSTNAME}:{nodeport}"
-    else:
-        grpc_endpoint = f"{EXTERNAL_HOSTNAME}:50051"
+    grpc_endpoint = f"{EXTERNAL_HOSTNAME}:80"
+    http_endpoint = f"http://{EXTERNAL_HOSTNAME}/proxy/{tenant_slug}"
 
-    logger.info(f"Endpoint discovery: tenant={tenant_slug}, grpc={grpc_endpoint}")
+    logger.info(f"Endpoint discovery: tenant={tenant_slug}, grpc={grpc_endpoint}, http={http_endpoint}")
 
     return {
         "appInstanceId": appInstanceId,
         "grpcEndpoint": grpc_endpoint,
+        "httpEndpoint": http_endpoint,
     }
