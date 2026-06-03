@@ -56,7 +56,7 @@ async def infer_jpeg(tenant_slug: str, request: Request):
 
     try:
         resp = await _http_client.post(
-            f"http://{cluster_ip}:8000/infer",
+            f"http://{cluster_ip}:8080/infer",
             content=jpeg_bytes,
             headers={
                 "Content-Type": "image/jpeg",
@@ -89,7 +89,7 @@ async def proxy_request(tenant_slug: str, path: str, request: Request):
     if not cluster_ip:
         raise HTTPException(502, f"Triton service not found for {tenant_slug}")
 
-    target_url = f"http://{cluster_ip}:8001/{path}"
+    target_url = f"http://{cluster_ip}:8080/{path}"
 
     body = await request.body()
     headers = {"Accept-Encoding": "identity"}

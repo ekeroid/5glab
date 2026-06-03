@@ -27,13 +27,9 @@ APP_MANIFEST = {
     "appSoftwareVersion": "1.0.0",
     "packageType": "CONTAINER",
     "containerSpec": {
-        "imageRegistry": "nvcr.io/nvidia/tritonserver",
-        "imageTag": "24.10-py3",
-        "command": [
-            "tritonserver",
-            "--model-repository=/models",
-            "--log-verbose=1",
-        ],
+        "imageRegistry": "ghcr.io/ekeroid/5glab",
+        "imageName": "edgevision-infer",
+        "imageTag": "latest",
     },
     "requiredResources": {
         "cpu": 4,
