@@ -42,12 +42,12 @@ def create_instance(tenant_slug: str, manifest: dict):
     """
     Create all k8s resources for a tenant's inference instance.
 
-    Creates PVC → Deployment → Service.
-    The image handles model export + Triton + sidecar internally.
+    Creates Deployment → Service.
+    The image includes the pre-built TRT engine — no PVC needed.
     """
     logger.info(f"Creating instance for tenant {tenant_slug}")
 
-    _create_pvc(tenant_slug)
+    _cluster_ip_cache.pop(tenant_slug, None)
     _create_deployment(tenant_slug)
     _create_service(tenant_slug)
 
@@ -122,38 +122,26 @@ def _create_deployment(tenant_slug: str):
                                 requests={"nvidia.com/gpu": "1"},
                                 limits={"nvidia.com/gpu": "1"},
                             ),
-                            volume_mounts=[
-                                client.V1VolumeMount(
-                                    name="model-store",
-                                    mount_path="/models",
-                                ),
-                            ],
+                            volume_mounts=[],
                             readiness_probe=client.V1Probe(
                                 http_get=client.V1HTTPGetAction(
                                     path="/health",
                                     port=8080,
                                 ),
-                                initial_delay_seconds=180,
-                                period_seconds=5,
+                                initial_delay_seconds=15,
+                                period_seconds=3,
                             ),
                             liveness_probe=client.V1Probe(
                                 http_get=client.V1HTTPGetAction(
                                     path="/health",
                                     port=8080,
                                 ),
-                                initial_delay_seconds=300,
+                                initial_delay_seconds=30,
                                 period_seconds=10,
                             ),
                         ),
                     ],
-                    volumes=[
-                        client.V1Volume(
-                            name="model-store",
-                            persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                                claim_name=f"{tenant_slug}-model-store",
-                            ),
-                        ),
-                    ],
+                    volumes=[],
                 ),
             ),
         ),
@@ -215,6 +203,75 @@ def get_instance_status(tenant_slug: str) -> str:
         raise
 
 
+def get_instance_status_detail(tenant_slug: str) -> dict:
+    """
+    Detailed startup status with phase breakdown.
+
+    Returns dict with: status, phase, message, pod_name, timestamps.
+    Phases: scheduling | pulling | starting | waiting_ready | ready | failed
+    """
+    result = {"status": "instantiating", "phase": "scheduling", "message": ""}
+
+    try:
+        pods = _core_v1.list_namespaced_pod(
+            CAMARA_NAMESPACE,
+            label_selector=f"tenant={tenant_slug},component=infer",
+        )
+    except client.ApiException:
+        return result
+
+    if not pods.items:
+        result["message"] = "Waiting for pod to be scheduled"
+        return result
+
+    pod = pods.items[0]
+    result["pod_name"] = pod.metadata.name
+
+    # Check container statuses
+    if pod.status.container_statuses:
+        cs = pod.status.container_statuses[0]
+        if cs.ready:
+            result["status"] = "ready"
+            result["phase"] = "ready"
+            result["message"] = "Inference server running"
+            return result
+
+        if cs.state.waiting:
+            reason = cs.state.waiting.reason or ""
+            if "Pull" in reason or "Image" in reason:
+                result["phase"] = "pulling"
+                result["message"] = f"Pulling image ({reason})"
+            elif "CrashLoopBackOff" in reason:
+                result["status"] = "failed"
+                result["phase"] = "failed"
+                result["message"] = "Container crash loop"
+            else:
+                result["phase"] = "starting"
+                result["message"] = f"Container starting ({reason})"
+            return result
+
+        if cs.state.running:
+            result["phase"] = "waiting_ready"
+            result["message"] = "Container running, waiting for readiness probe"
+            return result
+
+    # Pod scheduled but no container status yet
+    if pod.status.phase == "Pending":
+        # Check conditions for scheduling info
+        if pod.status.conditions:
+            for cond in pod.status.conditions:
+                if cond.type == "PodScheduled" and cond.status == "True":
+                    result["phase"] = "pulling"
+                    result["message"] = "Pod scheduled, pulling image"
+                    return result
+        result["message"] = "Waiting for pod to be scheduled"
+    elif pod.status.phase == "Running":
+        result["phase"] = "waiting_ready"
+        result["message"] = "Container running, waiting for readiness probe"
+
+    return result
+
+
 _cluster_ip_cache: dict[str, str] = {}
 
 
@@ -271,11 +328,3 @@ def delete_instance(tenant_slug: str):
         if e.status != 404:
             logger.warning(f"  Failed to delete service: {e.reason}")
 
-    try:
-        _core_v1.delete_namespaced_persistent_volume_claim(
-            f"{tenant_slug}-model-store", CAMARA_NAMESPACE
-        )
-        logger.info(f"  PVC {tenant_slug}-model-store deleted")
-    except client.ApiException as e:
-        if e.status != 404:
-            logger.warning(f"  Failed to delete PVC: {e.reason}")

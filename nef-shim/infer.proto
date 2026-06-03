@@ -15,6 +15,9 @@ message InferRequest {
 message InferResponse {
   repeated Detection detections = 1;
   float latency_ms = 2;
+  float preprocess_ms = 3;
+  float inference_ms = 4;
+  float postprocess_ms = 5;
 }
 
 message Detection {

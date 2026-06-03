@@ -119,8 +119,8 @@ def instantiate_app(app_id: str, zone_id: str) -> str:
     return instance_id
 
 
-def get_instance_status(app_instance_id: str) -> str:
-    """GET /edge-app-management/v0/app-instances/{id} — poll instance status."""
+def get_instance_status(app_instance_id: str) -> dict:
+    """GET /edge-app-management/v0/app-instances/{id} — poll instance status with detail."""
     url = f"{CAMARA_API_URL}/edge-app-management/v0/app-instances/{app_instance_id}"
 
     resp = requests.get(url, headers=_HEADERS, timeout=15)
@@ -128,12 +128,22 @@ def get_instance_status(app_instance_id: str) -> str:
     data = resp.json()
 
     status = data.get("status", "unknown")
-    logger.info(f"[CAMARA] Instance {app_instance_id[:8]}... status: {status}")
-    return status
+    phase = data.get("phase", "")
+    message = data.get("message", "")
+    logger.info(f"[CAMARA] Instance {app_instance_id[:8]}... status={status} phase={phase}")
+    return {"status": status, "phase": phase, "message": message}
 
 
 def get_endpoint(app_instance_id: str) -> str:
     """GET /application-endpoint-discovery/v0/endpoints — get inference endpoint."""
+    grpc_ep, http_ep = get_endpoints(app_instance_id)
+    if EDGE_TRANSPORT == "grpc":
+        return grpc_ep
+    return http_ep
+
+
+def get_endpoints(app_instance_id: str) -> tuple[str, str]:
+    """GET /application-endpoint-discovery/v0/endpoints — get both endpoints."""
     url = f"{CAMARA_API_URL}/application-endpoint-discovery/v0/endpoints"
     params = {"appInstanceId": app_instance_id}
 
@@ -142,14 +152,10 @@ def get_endpoint(app_instance_id: str) -> str:
     resp.raise_for_status()
     data = resp.json()
 
-    if EDGE_TRANSPORT == "grpc":
-        endpoint = data.get("grpcEndpoint", data.get("endpoint"))
-        logger.info(f"[CAMARA] gRPC endpoint: {endpoint}")
-    else:
-        endpoint = data.get("httpEndpoint", data.get("endpoint"))
-        logger.info(f"[CAMARA] HTTP endpoint: {endpoint}")
-
-    return endpoint
+    grpc_ep = data.get("grpcEndpoint", "")
+    http_ep = data.get("httpEndpoint", "")
+    logger.info(f"[CAMARA] Endpoints: gRPC={grpc_ep}, HTTP={http_ep}")
+    return grpc_ep, http_ep
 
 
 def terminate_app(app_instance_id: str):

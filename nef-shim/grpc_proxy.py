@@ -39,6 +39,8 @@ def _get_peer_ip(context: grpc.ServicerContext) -> str:
 
 
 _channels: dict[str, grpc.Channel] = {}
+_stubs: dict[str, infer_pb2_grpc.InferenceServiceStub] = {}
+_stub_targets: dict[str, str] = {}
 
 
 def _get_backend_stub(tenant_slug: str) -> infer_pb2_grpc.InferenceServiceStub | None:
@@ -46,7 +48,15 @@ def _get_backend_stub(tenant_slug: str) -> infer_pb2_grpc.InferenceServiceStub |
     if not cluster_ip:
         return None
     target = f"{cluster_ip}:50051"
-    if target not in _channels:
+
+    if tenant_slug in _stub_targets and _stub_targets[tenant_slug] != target:
+        old_target = _stub_targets[tenant_slug]
+        if old_target in _channels:
+            _channels[old_target].close()
+            del _channels[old_target]
+        _stubs.pop(tenant_slug, None)
+
+    if tenant_slug not in _stubs:
         _channels[target] = grpc.insecure_channel(
             target,
             options=[
@@ -54,7 +64,10 @@ def _get_backend_stub(tenant_slug: str) -> infer_pb2_grpc.InferenceServiceStub |
                 ("grpc.max_receive_message_length", 64 * 1024 * 1024),
             ],
         )
-    return infer_pb2_grpc.InferenceServiceStub(_channels[target])
+        _stubs[tenant_slug] = infer_pb2_grpc.InferenceServiceStub(_channels[target])
+        _stub_targets[tenant_slug] = target
+
+    return _stubs[tenant_slug]
 
 
 class InferenceProxyServicer(infer_pb2_grpc.InferenceServiceServicer):

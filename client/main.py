@@ -78,12 +78,13 @@ def _setup_edge() -> tuple[str, str]:
     poll_interval = 5
     elapsed = 0
     while elapsed < max_wait:
-        status = camara.get_instance_status(instance_id)
-        if status == "ready":
+        detail = camara.get_instance_status(instance_id)
+        if detail["status"] == "ready":
             logger.info(f"  → Instance READY after {elapsed}s")
             break
-        elif status == "failed":
-            raise RuntimeError(f"Instance {instance_id} failed to start")
+        elif detail["status"] == "failed":
+            raise RuntimeError(f"Instance {instance_id} failed: {detail['message']}")
+        logger.info(f"  [{detail['phase']}] {detail['message']}")
         time.sleep(poll_interval)
         elapsed += poll_interval
     else:

@@ -80,7 +80,7 @@ async def create_instance(body: dict, request: Request):
 
 @router.get("/app-instances/{app_instance_id}")
 async def get_instance(app_instance_id: str, request: Request):
-    """Poll instance status — checks k8s Job and Deployment readiness."""
+    """Poll instance status — checks k8s pod conditions for detailed breakdown."""
     tenant_ip = tenant_mod.get_tenant_id(request)
 
     if app_instance_id not in _instances:
@@ -90,11 +90,15 @@ async def get_instance(app_instance_id: str, request: Request):
     if instance["tenant_ip"] != tenant_ip:
         raise HTTPException(403, "Instance not owned by this tenant")
 
-    # Check live status from k8s
-    status = k8s_manager.get_instance_status(instance["tenant_slug"])
-    instance["status"] = status
+    detail = k8s_manager.get_instance_status_detail(instance["tenant_slug"])
+    instance["status"] = detail["status"]
 
-    return {"appInstanceId": app_instance_id, "status": status}
+    return {
+        "appInstanceId": app_instance_id,
+        "status": detail["status"],
+        "phase": detail["phase"],
+        "message": detail["message"],
+    }
 
 
 @router.delete("/app-instances/{app_instance_id}", status_code=204)

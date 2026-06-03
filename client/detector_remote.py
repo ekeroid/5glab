@@ -3,6 +3,9 @@ Remote detector — YOLOv8n inference via edge proxy (gRPC or HTTP).
 
 Used when MODE=edge. Sends raw JPEG to the NEF proxy which forwards
 to the Triton sidecar. Transport is selected by EDGE_TRANSPORT config.
+
+Returns a timing dict with keys: total_ms, preprocess_ms, inference_ms,
+postprocess_ms, network_ms (computed client-side).
 """
 
 import logging
@@ -30,13 +33,14 @@ def _get_session() -> requests.Session:
     return _session
 
 
-def _detect_http(jpeg_bytes: bytes, endpoint_url: str, max_retries: int) -> tuple[list[dict], float]:
+def _detect_http(jpeg_bytes: bytes, endpoint_url: str, max_retries: int) -> tuple[list[dict], dict]:
     session = _get_session()
     infer_url = f"{endpoint_url}/infer"
 
     last_error = None
     for attempt in range(max_retries):
         try:
+            t_start = time.perf_counter()
             resp = session.post(
                 infer_url,
                 data=jpeg_bytes,
@@ -46,9 +50,24 @@ def _detect_http(jpeg_bytes: bytes, endpoint_url: str, max_retries: int) -> tupl
                 },
                 timeout=15,
             )
+            t_end = time.perf_counter()
             resp.raise_for_status()
             data = resp.json()
-            return data.get("detections", []), data.get("latency_ms", 0.0)
+
+            e2e_ms = (t_end - t_start) * 1000
+            server_timing = data.get("timing", {})
+            server_total = server_timing.get("total_ms", data.get("latency_ms", 0))
+
+            timing = {
+                "total_ms": e2e_ms,
+                "server_ms": server_total,
+                "preprocess_ms": server_timing.get("preprocess_ms", 0),
+                "inference_ms": server_timing.get("inference_ms", 0),
+                "postprocess_ms": server_timing.get("postprocess_ms", 0),
+                "network_ms": max(0, e2e_ms - server_total),
+                "transport": "http",
+            }
+            return data.get("detections", []), timing
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             last_error = e
             logger.warning(f"HTTP inference attempt {attempt + 1}/{max_retries}: {type(e).__name__}")
@@ -95,7 +114,7 @@ def _reset_channel():
     _stub = None
 
 
-def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple[list[dict], float]:
+def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple[list[dict], dict]:
     import grpc
     import infer_pb2
 
@@ -108,7 +127,10 @@ def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple
     last_error = None
     for attempt in range(max_retries):
         try:
+            t_start = time.perf_counter()
             response = stub.Infer(request, timeout=15.0)
+            t_end = time.perf_counter()
+
             detections = []
             for det in response.detections:
                 detections.append({
@@ -116,7 +138,20 @@ def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple
                     "confidence": det.confidence,
                     "bbox": [det.bbox.x1, det.bbox.y1, det.bbox.x2, det.bbox.y2],
                 })
-            return detections, response.latency_ms
+
+            e2e_ms = (t_end - t_start) * 1000
+            server_total = response.latency_ms
+
+            timing = {
+                "total_ms": e2e_ms,
+                "server_ms": server_total,
+                "preprocess_ms": response.preprocess_ms,
+                "inference_ms": response.inference_ms,
+                "postprocess_ms": response.postprocess_ms,
+                "network_ms": max(0, e2e_ms - server_total),
+                "transport": "grpc",
+            }
+            return detections, timing
         except grpc.RpcError as e:
             last_error = e
             logger.warning(f"gRPC inference attempt {attempt + 1}/{max_retries}: {e.code()} {e.details()}")
@@ -135,11 +170,13 @@ def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple
 
 # --- Public API ---
 
-def detect(jpeg_bytes: bytes, endpoint: str, max_retries: int = 3) -> tuple[list[dict], float]:
+def detect(jpeg_bytes: bytes, endpoint: str, max_retries: int = 3) -> tuple[list[dict], dict]:
     """
     Run inference via the configured transport.
 
-    endpoint: for HTTP this is the base URL, for gRPC this is host:port.
+    Returns (detections, timing_dict).
+    timing_dict keys: total_ms, server_ms, preprocess_ms, inference_ms,
+                      postprocess_ms, network_ms, transport.
     """
     if EDGE_TRANSPORT == "grpc":
         return _detect_grpc(jpeg_bytes, endpoint, max_retries)

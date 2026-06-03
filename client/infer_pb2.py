@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0binfer.proto\x12\nedgevision\":\n\x0cInferRequest\x12\x0c\n\x04jpeg\x18\x01 \x01(\x0c\x12\x1c\n\x14\x63onfidence_threshold\x18\x02 \x01(\x02\"N\n\rInferResponse\x12)\n\ndetections\x18\x01 \x03(\x0b\x32\x15.edgevision.Detection\x12\x12\n\nlatency_ms\x18\x02 \x01(\x02\"N\n\tDetection\x12\r\n\x05label\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x02\x12\x1e\n\x04\x62\x62ox\x18\x03 \x01(\x0b\x32\x10.edgevision.BBox\"6\n\x04\x42\x42ox\x12\n\n\x02x1\x18\x01 \x01(\x02\x12\n\n\x02y1\x18\x02 \x01(\x02\x12\n\n\x02x2\x18\x03 \x01(\x02\x12\n\n\x02y2\x18\x04 \x01(\x02\"\x0f\n\rHealthRequest\".\n\x0eHealthResponse\x12\x0c\n\x04live\x18\x01 \x01(\x08\x12\x0e\n\x06status\x18\x02 \x01(\t2\x91\x01\n\x10InferenceService\x12<\n\x05Infer\x12\x18.edgevision.InferRequest\x1a\x19.edgevision.InferResponse\x12?\n\x06Health\x12\x19.edgevision.HealthRequest\x1a\x1a.edgevision.HealthResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0binfer.proto\x12\nedgevision\":\n\x0cInferRequest\x12\x0c\n\x04jpeg\x18\x01 \x01(\x0c\x12\x1c\n\x14\x63onfidence_threshold\x18\x02 \x01(\x02\"\x93\x01\n\rInferResponse\x12)\n\ndetections\x18\x01 \x03(\x0b\x32\x15.edgevision.Detection\x12\x12\n\nlatency_ms\x18\x02 \x01(\x02\x12\x15\n\rpreprocess_ms\x18\x03 \x01(\x02\x12\x14\n\x0cinference_ms\x18\x04 \x01(\x02\x12\x16\n\x0epostprocess_ms\x18\x05 \x01(\x02\"N\n\tDetection\x12\r\n\x05label\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x02\x12\x1e\n\x04\x62\x62ox\x18\x03 \x01(\x0b\x32\x10.edgevision.BBox\"6\n\x04\x42\x42ox\x12\n\n\x02x1\x18\x01 \x01(\x02\x12\n\n\x02y1\x18\x02 \x01(\x02\x12\n\n\x02x2\x18\x03 \x01(\x02\x12\n\n\x02y2\x18\x04 \x01(\x02\"\x0f\n\rHealthRequest\".\n\x0eHealthResponse\x12\x0c\n\x04live\x18\x01 \x01(\x08\x12\x0e\n\x06status\x18\x02 \x01(\t2\x91\x01\n\x10InferenceService\x12<\n\x05Infer\x12\x18.edgevision.InferRequest\x1a\x19.edgevision.InferResponse\x12?\n\x06Health\x12\x19.edgevision.HealthRequest\x1a\x1a.edgevision.HealthResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,16 +33,16 @@ if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_INFERREQUEST']._serialized_start=27
   _globals['_INFERREQUEST']._serialized_end=85
-  _globals['_INFERRESPONSE']._serialized_start=87
-  _globals['_INFERRESPONSE']._serialized_end=165
-  _globals['_DETECTION']._serialized_start=167
-  _globals['_DETECTION']._serialized_end=245
-  _globals['_BBOX']._serialized_start=247
-  _globals['_BBOX']._serialized_end=301
-  _globals['_HEALTHREQUEST']._serialized_start=303
-  _globals['_HEALTHREQUEST']._serialized_end=318
-  _globals['_HEALTHRESPONSE']._serialized_start=320
-  _globals['_HEALTHRESPONSE']._serialized_end=366
-  _globals['_INFERENCESERVICE']._serialized_start=369
-  _globals['_INFERENCESERVICE']._serialized_end=514
+  _globals['_INFERRESPONSE']._serialized_start=88
+  _globals['_INFERRESPONSE']._serialized_end=235
+  _globals['_DETECTION']._serialized_start=237
+  _globals['_DETECTION']._serialized_end=315
+  _globals['_BBOX']._serialized_start=317
+  _globals['_BBOX']._serialized_end=371
+  _globals['_HEALTHREQUEST']._serialized_start=373
+  _globals['_HEALTHREQUEST']._serialized_end=388
+  _globals['_HEALTHRESPONSE']._serialized_start=390
+  _globals['_HEALTHRESPONSE']._serialized_end=436
+  _globals['_INFERENCESERVICE']._serialized_start=439
+  _globals['_INFERENCESERVICE']._serialized_end=584
 # @@protoc_insertion_point(module_scope)

@@ -24,9 +24,10 @@ PANEL_W = 640
 PANEL_H = 400
 BAR_H = 50
 LOG_H = 200
-CHART_H = 60
+CHART_H = 80
+BREAKDOWN_H = 40
 WINDOW_W = PANEL_W * 2
-WINDOW_H = BAR_H + PANEL_H + LOG_H + CHART_H
+WINDOW_H = BAR_H + PANEL_H + LOG_H + CHART_H + BREAKDOWN_H
 
 
 class EdgeVisionGUI:
@@ -34,6 +35,8 @@ class EdgeVisionGUI:
         self._mode = "local"
         self._edge_instance_id = None
         self._edge_endpoint = None
+        self._edge_grpc_endpoint = None
+        self._edge_http_endpoint = None
         self._edge_setup_in_progress = False
 
         self._event_log: list[tuple[str, str, str]] = []  # (timestamp, status_icon, message)
@@ -47,7 +50,7 @@ class EdgeVisionGUI:
         self._latest_input = np.zeros((PANEL_H, PANEL_W, 3), dtype=np.uint8)
         self._latest_output = np.zeros((PANEL_H, PANEL_W, 3), dtype=np.uint8)
         self._latest_latency = 0.0
-        self._latest_server_latency = 0.0
+        self._latest_timing: dict = {}
         self._latest_det_count = 0
         self._lock = threading.Lock()
 
@@ -55,6 +58,16 @@ class EdgeVisionGUI:
         ts = time.strftime("%H:%M:%S")
         self._event_log.append((ts, icon, msg))
         print(f"[{ts}] {icon} {msg}")
+
+    def _toggle_transport(self):
+        if config.EDGE_TRANSPORT == "grpc":
+            config.EDGE_TRANSPORT = "http"
+            self._edge_endpoint = self._edge_http_endpoint
+        else:
+            config.EDGE_TRANSPORT = "grpc"
+            self._edge_endpoint = self._edge_grpc_endpoint
+        detector_remote._reset_channel()
+        self._log_event(">>", f"Transport: {config.EDGE_TRANSPORT.upper()} → {self._edge_endpoint}")
 
     def _toggle_mode(self):
         if self._edge_setup_in_progress:
@@ -100,32 +113,44 @@ class EdgeVisionGUI:
             self._log_event("OK", f"Instance created: {instance_id[:8]}... [{ms:.0f}ms]")
 
             # Step 4: Wait for ready
-            self._log_event("..", "Waiting for GPU instance to become ready...")
+            self._log_event("..", "Waiting for GPU instance...")
             t0 = time.perf_counter()
-            poll_count = 0
+            last_phase = ""
+            phase_start = t0
             for _ in range(60):
                 if self._mode != "edge":
                     self._log_event("--", "Cancelled by user")
                     return
-                status = camara.get_instance_status(instance_id)
-                poll_count += 1
-                if status == "ready":
+                detail = camara.get_instance_status(instance_id)
+                phase = detail.get("phase", "")
+                if phase != last_phase:
+                    if last_phase:
+                        phase_ms = (time.perf_counter() - phase_start) * 1000
+                        self._log_event("OK", f"  {last_phase}: {phase_ms:.0f}ms")
+                    last_phase = phase
+                    phase_start = time.perf_counter()
+                    self._log_event("..", f"  {phase}: {detail.get('message', '')}")
+                if detail["status"] == "ready":
+                    phase_ms = (time.perf_counter() - phase_start) * 1000
+                    self._log_event("OK", f"  {phase}: {phase_ms:.0f}ms")
                     break
-                elif status == "failed":
-                    raise RuntimeError("Instance failed to start")
-                time.sleep(5)
+                elif detail["status"] == "failed":
+                    raise RuntimeError(f"Instance failed: {detail.get('message')}")
+                time.sleep(3)
             else:
-                raise RuntimeError("Timeout waiting for instance (300s)")
-            ms = (time.perf_counter() - t0) * 1000
-            self._log_event("OK", f"Instance READY ({poll_count} polls, {ms/1000:.1f}s)")
+                raise RuntimeError("Timeout waiting for instance (180s)")
+            total_s = time.perf_counter() - t0
+            self._log_event("OK", f"Instance READY in {total_s:.1f}s")
 
             # Step 5: Get endpoint
             self._log_event("..", "Discovering inference endpoint...")
             t0 = time.perf_counter()
-            endpoint = camara.get_endpoint(instance_id)
-            self._edge_endpoint = endpoint
+            grpc_ep, http_ep = camara.get_endpoints(instance_id)
+            self._edge_grpc_endpoint = grpc_ep
+            self._edge_http_endpoint = http_ep
+            self._edge_endpoint = grpc_ep if config.EDGE_TRANSPORT == "grpc" else http_ep
             ms = (time.perf_counter() - t0) * 1000
-            self._log_event("OK", f"Endpoint: {endpoint} [{ms:.0f}ms]")
+            self._log_event("OK", f"gRPC: {grpc_ep}  HTTP: {http_ep} [{ms:.0f}ms]")
 
             # Done
             self._edge_setup_in_progress = False
@@ -168,15 +193,18 @@ class EdgeVisionGUI:
             input_resized = cv2.resize(input_frame, (PANEL_W, PANEL_H))
 
             infer_start = time.perf_counter()
-            server_ms = 0.0
+            timing = {}
             try:
                 if self._mode == "edge" and self._edge_endpoint and not self._edge_setup_in_progress:
-                    detections, server_ms = detector_remote.detect(jpeg_bytes, self._edge_endpoint)
+                    detections, timing = detector_remote.detect(jpeg_bytes, self._edge_endpoint)
                 else:
+                    t0 = time.perf_counter()
                     detections = detector_local.detect(jpeg_bytes)
+                    local_ms = (time.perf_counter() - t0) * 1000
+                    timing = {"total_ms": local_ms, "inference_ms": local_ms, "transport": "local"}
             except Exception:
                 detections = []
-            infer_ms = (time.perf_counter() - infer_start) * 1000
+            infer_ms = timing.get("total_ms", (time.perf_counter() - infer_start) * 1000)
 
             output_frame = self._annotate(input_frame.copy(), detections, infer_ms)
             output_resized = cv2.resize(output_frame, (PANEL_W, PANEL_H))
@@ -185,7 +213,7 @@ class EdgeVisionGUI:
                 self._latest_input = input_resized
                 self._latest_output = output_resized
                 self._latest_latency = infer_ms
-                self._latest_server_latency = server_ms
+                self._latest_timing = timing
                 self._latest_det_count = len(detections)
                 self._latency_history.append(infer_ms)
                 self._frame_count += 1
@@ -238,32 +266,30 @@ class EdgeVisionGUI:
         cv2.putText(canvas, badge_text, (18, 34),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        # Latency with breakdown
-        total_ms = self._latest_latency
-        server_ms = self._latest_server_latency
-        is_edge_active = self._mode == "edge" and not self._edge_setup_in_progress
-        net_ms = max(0, total_ms - server_ms) if is_edge_active and server_ms > 0 else 0
+        # Transport badge
+        transport = self._latest_timing.get("transport", "local").upper()
+        tx = 170
+        cv2.putText(canvas, transport, (tx, 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
 
-        lat_colour = (0, 255, 100) if is_edge_active else (0, 180, 255)
-        if is_edge_active and server_ms > 0:
-            lat_text = f"{total_ms:.0f}ms total (GPU:{server_ms:.0f} + net:{net_ms:.0f})"
-        else:
-            lat_text = f"{total_ms:.0f} ms"
-        cv2.putText(canvas, lat_text, (180, 34),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, lat_colour, 1)
+        # Total latency
+        total_ms = self._latest_latency
+        lat_colour = (0, 255, 100) if (self._mode == "edge" and not self._edge_setup_in_progress) else (0, 180, 255)
+        cv2.putText(canvas, f"{total_ms:.0f}ms", (230, 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, lat_colour, 2)
 
         # Stats
         history = list(self._latency_history)
         if history:
             avg = sum(history) / len(history)
-            stats = f"FPS: {self._fps:.1f}  |  Avg: {avg:.0f}ms  |  Frames: {self._frame_count}"
+            stats = f"FPS: {self._fps:.1f}  |  Avg: {avg:.0f}ms  |  #{self._frame_count}"
         else:
             stats = "Starting..."
         cv2.putText(canvas, stats, (580, 34),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
 
         # Controls hint
-        cv2.putText(canvas, "[E] Toggle  [Q] Quit", (WINDOW_W - 220, 34),
+        cv2.putText(canvas, "[E] Toggle  [T] Transport  [Q] Quit", (WINDOW_W - 340, 34),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
 
     def _draw_event_log(self, canvas: np.ndarray):
@@ -310,8 +336,71 @@ class EdgeVisionGUI:
             cv2.putText(canvas, msg[:100], (120, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
 
+    def _draw_breakdown_bar(self, canvas: np.ndarray):
+        """Draw a stacked horizontal bar showing latency breakdown."""
+        bar_y = BAR_H + PANEL_H + LOG_H
+        cv2.rectangle(canvas, (0, bar_y), (WINDOW_W, bar_y + BREAKDOWN_H), (25, 25, 25), -1)
+        cv2.line(canvas, (0, bar_y), (WINDOW_W, bar_y), (60, 60, 60), 1)
+
+        timing = self._latest_timing
+        if not timing:
+            return
+
+        total = timing.get("total_ms", 0)
+        if total <= 0:
+            return
+
+        # Segments: network (orange), preprocess (blue), inference (green), postprocess (purple)
+        segments = []
+        is_edge = self._mode == "edge" and not self._edge_setup_in_progress
+
+        if is_edge:
+            segments = [
+                ("Network", timing.get("network_ms", 0), (0, 140, 255)),
+                ("Preprocess", timing.get("preprocess_ms", 0), (200, 150, 0)),
+                ("GPU Infer", timing.get("inference_ms", 0), (0, 200, 0)),
+                ("Postprocess", timing.get("postprocess_ms", 0), (180, 0, 180)),
+            ]
+        else:
+            segments = [
+                ("CPU Infer", timing.get("inference_ms", 0), (0, 140, 200)),
+            ]
+
+        # Draw stacked bar
+        margin = 10
+        bar_width = WINDOW_W - 200 - margin * 2
+        bar_height = 18
+        bx = margin
+        by = bar_y + (BREAKDOWN_H - bar_height) // 2
+
+        # Background
+        cv2.rectangle(canvas, (bx, by), (bx + bar_width, by + bar_height), (50, 50, 50), -1)
+
+        # Draw segments
+        x_offset = bx
+        for name, ms, colour in segments:
+            if ms <= 0:
+                continue
+            seg_w = max(1, int((ms / total) * bar_width))
+            cv2.rectangle(canvas, (x_offset, by), (x_offset + seg_w, by + bar_height), colour, -1)
+            if seg_w > 40:
+                cv2.putText(canvas, f"{ms:.0f}", (x_offset + 3, by + 13),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+            x_offset += seg_w
+
+        # Legend on the right
+        lx = WINDOW_W - 180
+        ly = bar_y + 12
+        for name, ms, colour in segments:
+            if ms <= 0:
+                continue
+            cv2.rectangle(canvas, (lx, ly - 6), (lx + 8, ly + 2), colour, -1)
+            cv2.putText(canvas, f"{name}: {ms:.1f}ms", (lx + 12, ly),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 180, 180), 1)
+            ly += 14
+
     def _draw_latency_chart(self, canvas: np.ndarray):
-        chart_y = BAR_H + PANEL_H + LOG_H
+        chart_y = BAR_H + PANEL_H + LOG_H + BREAKDOWN_H
         cv2.line(canvas, (0, chart_y), (WINDOW_W, chart_y), (60, 60, 60), 1)
 
         history = list(self._latency_history)
@@ -357,6 +446,7 @@ class EdgeVisionGUI:
 
         self._draw_top_bar(canvas)
         self._draw_event_log(canvas)
+        self._draw_breakdown_bar(canvas)
         self._draw_latency_chart(canvas)
 
         return canvas
@@ -382,6 +472,8 @@ class EdgeVisionGUI:
                 self._running = False
             elif key == ord('e') or key == ord('E'):
                 self._toggle_mode()
+            elif key == ord('t') or key == ord('T'):
+                self._toggle_transport()
 
         if self._edge_instance_id:
             self._teardown_edge()

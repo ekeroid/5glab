@@ -77,9 +77,9 @@ def _init_triton():
     _outputs[0].set_shared_memory("infer_output", OUTPUT_BYTE_SIZE)
 
 
-def _run_inference(jpeg_bytes: bytes, confidence: float) -> tuple[list[dict], float]:
-    """Run full inference pipeline. Returns (detections, latency_ms)."""
-    start = time.perf_counter()
+def _run_inference(jpeg_bytes: bytes, confidence: float) -> tuple[list[dict], dict]:
+    """Run full inference pipeline. Returns (detections, timing_breakdown)."""
+    t0 = time.perf_counter()
 
     img_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
@@ -92,15 +92,27 @@ def _run_inference(jpeg_bytes: bytes, confidence: float) -> tuple[list[dict], fl
     img = img.astype(np.float32) / 255.0
     tensor = np.transpose(img, (2, 0, 1))[np.newaxis].astype(np.float32)
 
+    t1 = time.perf_counter()
+
     shm.set_shared_memory_region(_shm_input, [tensor])
     _triton.infer(MODEL_NAME, _inputs, outputs=_outputs)
     output = shm.get_contents_as_numpy(
         _shm_output, utils.triton_to_np_dtype("FP32"), [1, 84, 8400]
     )
 
+    t2 = time.perf_counter()
+
     detections = _postprocess(output, scale_x, scale_y, confidence)
-    elapsed_ms = (time.perf_counter() - start) * 1000
-    return detections, elapsed_ms
+
+    t3 = time.perf_counter()
+
+    timing = {
+        "preprocess_ms": round((t1 - t0) * 1000, 2),
+        "inference_ms": round((t2 - t1) * 1000, 2),
+        "postprocess_ms": round((t3 - t2) * 1000, 2),
+        "total_ms": round((t3 - t0) * 1000, 2),
+    }
+    return detections, timing
 
 
 # --- gRPC Service ---
@@ -108,9 +120,14 @@ def _run_inference(jpeg_bytes: bytes, confidence: float) -> tuple[list[dict], fl
 class InferenceServicer(infer_pb2_grpc.InferenceServiceServicer):
     def Infer(self, request, context):
         confidence = request.confidence_threshold if request.confidence_threshold > 0 else 0.35
-        detections, latency_ms = _run_inference(request.jpeg, confidence)
+        detections, timing = _run_inference(request.jpeg, confidence)
 
-        response = infer_pb2.InferResponse(latency_ms=latency_ms)
+        response = infer_pb2.InferResponse(
+            latency_ms=timing["total_ms"],
+            preprocess_ms=timing["preprocess_ms"],
+            inference_ms=timing["inference_ms"],
+            postprocess_ms=timing["postprocess_ms"],
+        )
         for det in detections:
             bbox = infer_pb2.BBox(
                 x1=det["bbox"][0], y1=det["bbox"][1],
@@ -167,10 +184,11 @@ async def health():
 async def infer(request: Request):
     jpeg_bytes = await request.body()
     confidence = float(request.headers.get("X-Confidence-Threshold", "0.35"))
-    detections, latency_ms = _run_inference(jpeg_bytes, confidence)
+    detections, timing = _run_inference(jpeg_bytes, confidence)
     return JSONResponse({
         "detections": detections,
-        "latency_ms": round(latency_ms, 1),
+        "latency_ms": timing["total_ms"],
+        "timing": timing,
     })
 
 
