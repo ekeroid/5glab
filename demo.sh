@@ -13,6 +13,12 @@
 set -e
 cd "$(dirname "$0")"
 
+# Activate project venv
+VENV_DIR="$(cd .. && pwd)/.venv"
+if [ -f "$VENV_DIR/bin/activate" ]; then
+    source "$VENV_DIR/bin/activate"
+fi
+
 CAMERA_API_URL="http://localhost:8081"
 CAMARA_API_URL="http://camara.5glab.control.lth.se"
 EDGE_TRANSPORT="${EDGE_TRANSPORT:-grpc}"
@@ -42,13 +48,14 @@ start() {
     CAMARA_API_URL="$CAMARA_API_URL" \
     EDGE_TRANSPORT="$EDGE_TRANSPORT" \
     FRAME_INTERVAL_MS="$FRAME_INTERVAL_MS" \
-    python3 client/gui.py &
+    python3 client/gui.py --edge &
     echo $! > /tmp/edgevision-gui.pid
 
     echo ""
     echo "Demo running. Controls:"
     echo "  [E] Toggle LOCAL/EDGE mode"
     echo "  [T] Toggle gRPC/HTTP transport"
+    echo "  [M] Toggle model: detect/seg"
     echo "  [Q] Quit GUI"
     echo ""
     echo "Stop with: ./demo.sh stop"

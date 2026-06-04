@@ -10,6 +10,7 @@ service InferenceService {
 message InferRequest {
   bytes jpeg = 1;
   float confidence_threshold = 2;
+  string model = 3;  // "detect" (default) or "seg"
 }
 
 message InferResponse {
@@ -24,6 +25,7 @@ message Detection {
   string label = 1;
   float confidence = 2;
   BBox bbox = 3;
+  repeated Point mask_polygon = 4;
 }
 
 message BBox {
@@ -31,6 +33,11 @@ message BBox {
   float y1 = 2;
   float x2 = 3;
   float y2 = 4;
+}
+
+message Point {
+  float x = 1;
+  float y = 2;
 }
 
 message HealthRequest {}

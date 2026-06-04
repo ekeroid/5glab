@@ -51,7 +51,13 @@ async def get_endpoint(
     if instance["status"] != "ready":
         raise HTTPException(409, f"Instance not ready (status: {instance['status']})")
 
-    grpc_endpoint = f"{EXTERNAL_HOSTNAME}:80"
+    # gRPC: direct NodePort to bypass Envoy buffering (saves ~40ms)
+    grpc_nodeport = k8s_manager.get_service_grpc_nodeport(tenant_slug)
+    if grpc_nodeport:
+        grpc_endpoint = f"{EXTERNAL_HOSTNAME}:{grpc_nodeport}"
+    else:
+        grpc_endpoint = f"{EXTERNAL_HOSTNAME}:80"
+
     http_endpoint = f"http://{EXTERNAL_HOSTNAME}/proxy/{tenant_slug}"
 
     logger.info(f"Endpoint discovery: tenant={tenant_slug}, grpc={grpc_endpoint}, http={http_endpoint}")

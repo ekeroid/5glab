@@ -33,7 +33,7 @@ def _get_session() -> requests.Session:
     return _session
 
 
-def _detect_http(jpeg_bytes: bytes, endpoint_url: str, max_retries: int) -> tuple[list[dict], dict]:
+def _detect_http(jpeg_bytes: bytes, endpoint_url: str, max_retries: int, model: str = "detect") -> tuple[list[dict], dict]:
     session = _get_session()
     infer_url = f"{endpoint_url}/infer"
 
@@ -47,6 +47,7 @@ def _detect_http(jpeg_bytes: bytes, endpoint_url: str, max_retries: int) -> tupl
                 headers={
                     "Content-Type": "image/jpeg",
                     "X-Confidence-Threshold": str(CONFIDENCE_THRESHOLD),
+                    "X-Model": model,
                 },
                 timeout=15,
             )
@@ -114,7 +115,7 @@ def _reset_channel():
     _stub = None
 
 
-def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple[list[dict], dict]:
+def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int, model: str = "detect") -> tuple[list[dict], dict]:
     import grpc
     import infer_pb2
 
@@ -122,6 +123,7 @@ def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple
     request = infer_pb2.InferRequest(
         jpeg=jpeg_bytes,
         confidence_threshold=CONFIDENCE_THRESHOLD,
+        model=model,
     )
 
     last_error = None
@@ -133,11 +135,14 @@ def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple
 
             detections = []
             for det in response.detections:
-                detections.append({
+                d = {
                     "label": det.label,
                     "confidence": det.confidence,
                     "bbox": [det.bbox.x1, det.bbox.y1, det.bbox.x2, det.bbox.y2],
-                })
+                }
+                if det.mask_polygon:
+                    d["mask_polygon"] = [[pt.x, pt.y] for pt in det.mask_polygon]
+                detections.append(d)
 
             e2e_ms = (t_end - t_start) * 1000
             server_total = response.latency_ms
@@ -170,7 +175,7 @@ def _detect_grpc(jpeg_bytes: bytes, grpc_target: str, max_retries: int) -> tuple
 
 # --- Public API ---
 
-def detect(jpeg_bytes: bytes, endpoint: str, max_retries: int = 3) -> tuple[list[dict], dict]:
+def detect(jpeg_bytes: bytes, endpoint: str, max_retries: int = 3, model: str = "detect") -> tuple[list[dict], dict]:
     """
     Run inference via the configured transport.
 
@@ -179,8 +184,8 @@ def detect(jpeg_bytes: bytes, endpoint: str, max_retries: int = 3) -> tuple[list
                       postprocess_ms, network_ms, transport.
     """
     if EDGE_TRANSPORT == "grpc":
-        return _detect_grpc(jpeg_bytes, endpoint, max_retries)
-    return _detect_http(jpeg_bytes, endpoint, max_retries)
+        return _detect_grpc(jpeg_bytes, endpoint, max_retries, model)
+    return _detect_http(jpeg_bytes, endpoint, max_retries, model)
 
 
 def health_check(endpoint: str) -> bool:

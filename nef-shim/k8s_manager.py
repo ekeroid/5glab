@@ -128,16 +128,17 @@ def _create_deployment(tenant_slug: str):
                                     path="/health",
                                     port=8080,
                                 ),
-                                initial_delay_seconds=15,
-                                period_seconds=3,
+                                initial_delay_seconds=30,
+                                period_seconds=5,
                             ),
                             liveness_probe=client.V1Probe(
                                 http_get=client.V1HTTPGetAction(
                                     path="/health",
                                     port=8080,
                                 ),
-                                initial_delay_seconds=30,
-                                period_seconds=10,
+                                initial_delay_seconds=600,
+                                period_seconds=15,
+                                failure_threshold=5,
                             ),
                         ),
                     ],
@@ -251,8 +252,8 @@ def get_instance_status_detail(tenant_slug: str) -> dict:
             return result
 
         if cs.state.running:
-            result["phase"] = "waiting_ready"
-            result["message"] = "Container running, waiting for readiness probe"
+            result["phase"] = "building_models"
+            result["message"] = _get_build_phase(pod.metadata.name)
             return result
 
     # Pod scheduled but no container status yet
@@ -266,10 +267,36 @@ def get_instance_status_detail(tenant_slug: str) -> dict:
                     return result
         result["message"] = "Waiting for pod to be scheduled"
     elif pod.status.phase == "Running":
-        result["phase"] = "waiting_ready"
-        result["message"] = "Container running, waiting for readiness probe"
+        result["phase"] = "building_models"
+        result["message"] = _get_build_phase(pod.metadata.name)
 
     return result
+
+
+def _get_build_phase(pod_name: str) -> str:
+    """Read pod logs tail to determine what the entrypoint is doing."""
+    try:
+        logs = _core_v1.read_namespaced_pod_log(
+            pod_name, CAMARA_NAMESPACE, tail_lines=5
+        )
+        if "Building YOLOv8x-seg TRT engine" in logs:
+            if "trtexec" in logs or "Building" in logs:
+                return "Building YOLOv8x-seg TensorRT FP16 engine (first boot, ~3-5 min)"
+        if "ONNX" in logs and "export success" in logs:
+            return "ONNX exported, building TensorRT FP16 engine..."
+        if "Exporting" in logs:
+            return "Exporting YOLOv8x-seg to ONNX..."
+        if "Loading YOLOv8x-seg" in logs:
+            return "Loading YOLOv8x-seg model weights..."
+        if "Starting Triton" in logs:
+            return "Starting Triton Inference Server..."
+        if "Starting inference sidecar" in logs:
+            return "Starting inference sidecar (almost ready)..."
+        if "Triton ready" in logs:
+            return "Triton ready, starting sidecar..."
+    except Exception:
+        pass
+    return "Container running, initializing models..."
 
 
 _cluster_ip_cache: dict[str, str] = {}
