@@ -86,16 +86,18 @@ class EdgeVisionGUI:
             return
 
         if self._mode == "local":
-            self._mode = "edge"
-            self._edge_setup_in_progress = True
-            self._event_log.clear()
-            self._log_event(">>", "EDGE OFFLOAD INITIATED")
-            threading.Thread(target=self._setup_edge, daemon=True).start()
+            if self._edge_endpoint:
+                self._mode = "edge"
+                self._log_event(">>", "Switched to EDGE GPU mode")
+            else:
+                self._mode = "edge"
+                self._edge_setup_in_progress = True
+                self._event_log.clear()
+                self._log_event(">>", "EDGE OFFLOAD INITIATED")
+                threading.Thread(target=self._setup_edge, daemon=True).start()
         else:
             self._mode = "local"
             self._log_event("<<", "Switched to LOCAL CPU mode")
-            if self._edge_instance_id:
-                threading.Thread(target=self._teardown_edge, daemon=True).start()
 
     def _setup_edge(self):
         try:
@@ -160,9 +162,13 @@ class EdgeVisionGUI:
             grpc_ep, http_ep = camara.get_endpoints(instance_id)
             self._edge_grpc_endpoint = grpc_ep
             self._edge_http_endpoint = http_ep
-            self._edge_endpoint = grpc_ep if config.EDGE_TRANSPORT == "grpc" else http_ep
+            if config.EDGE_TRANSPORT == "grpc" and grpc_ep:
+                self._edge_endpoint = grpc_ep
+            else:
+                config.EDGE_TRANSPORT = "http"
+                self._edge_endpoint = http_ep
             ms = (time.perf_counter() - t0) * 1000
-            self._log_event("OK", f"gRPC: {grpc_ep}  HTTP: {http_ep} [{ms:.0f}ms]")
+            self._log_event("OK", f"gRPC: {grpc_ep or 'N/A'}  HTTP: {http_ep} [{ms:.0f}ms]")
 
             # Done
             self._edge_setup_in_progress = False
@@ -208,8 +214,19 @@ class EdgeVisionGUI:
             timing = {}
             try:
                 if self._mode == "edge" and self._edge_endpoint and not self._edge_setup_in_progress:
-                    detections, timing = detector_remote.detect(
-                        jpeg_bytes, self._edge_endpoint, model=self._model_mode)
+                    try:
+                        detections, timing = detector_remote.detect(
+                            jpeg_bytes, self._edge_endpoint, model=self._model_mode)
+                    except RuntimeError:
+                        if config.EDGE_TRANSPORT == "grpc" and self._edge_http_endpoint:
+                            config.EDGE_TRANSPORT = "http"
+                            self._edge_endpoint = self._edge_http_endpoint
+                            detector_remote._reset_channel()
+                            self._log_event(">>", f"gRPC unreachable, falling back to HTTP")
+                            detections, timing = detector_remote.detect(
+                                jpeg_bytes, self._edge_endpoint, model=self._model_mode)
+                        else:
+                            raise
                 elif self._model_mode == "seg":
                     detections, timing = detector_local_seg.detect(jpeg_bytes)
                 else:
