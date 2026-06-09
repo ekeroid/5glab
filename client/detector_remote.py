@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 # --- HTTP transport ---
 
-_session: requests.Session | None = None
+from typing import Optional
+_session: Optional[requests.Session] = None
 
 
 def _get_session() -> requests.Session:

@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 os.environ.setdefault("TORCHINDUCTOR_DISABLE", "1")
 
-_model: YOLO | None = None
+from typing import Optional
+_model: Optional[YOLO] = None
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "yolov8x-seg.pt")
 
 

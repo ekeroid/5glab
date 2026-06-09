@@ -20,8 +20,9 @@ MODEM_USER = "admin"
 MODEM_PASS = "x7SBj25G!"
 POLL_INTERVAL = 2.0
 
-_token: str | None = None
-_session: requests.Session | None = None
+from typing import Optional
+_token: Optional[str] = None
+_session: Optional[requests.Session] = None
 _radio_data: dict = {}
 _lock = threading.Lock()
 _running = False
@@ -52,7 +53,7 @@ def _login() -> bool:
     return False
 
 
-def _poll_once() -> dict | None:
+def _poll_once() -> Optional[dict]:
     global _token
     if not _token:
         if not _login():

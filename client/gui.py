@@ -20,6 +20,7 @@ import config
 import detector_local
 import detector_local_seg
 import detector_remote
+import latency_collector
 import modem
 
 PANEL_W = 640
@@ -58,6 +59,8 @@ class EdgeVisionGUI:
         self._latest_det_count = 0
         self._lock = threading.Lock()
 
+        latency_collector.start("edgevision")
+
     def _log_event(self, icon: str, msg: str):
         ts = time.strftime("%H:%M:%S")
         self._event_log.append((ts, icon, msg))
@@ -88,6 +91,9 @@ class EdgeVisionGUI:
         if self._mode == "local":
             if self._edge_endpoint:
                 self._mode = "edge"
+                with self._lock:
+                    self._latest_timing = {}
+                    self._latest_latency = 0.0
                 self._log_event(">>", "Switched to EDGE GPU mode")
             else:
                 self._mode = "edge"
@@ -97,6 +103,9 @@ class EdgeVisionGUI:
                 threading.Thread(target=self._setup_edge, daemon=True).start()
         else:
             self._mode = "local"
+            with self._lock:
+                self._latest_timing = {}
+                self._latest_latency = 0.0
             self._log_event("<<", "Switched to LOCAL CPU mode")
 
     def _setup_edge(self):
@@ -241,6 +250,8 @@ class EdgeVisionGUI:
             output_frame = self._annotate(input_frame.copy(), detections, infer_ms)
             output_resized = cv2.resize(output_frame, (PANEL_W, PANEL_H))
 
+            latency_collector.record(timing, self._mode, self._model_mode)
+
             with self._lock:
                 self._latest_input = input_resized
                 self._latest_output = output_resized
@@ -311,7 +322,12 @@ class EdgeVisionGUI:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Transport badge
-        transport = self._latest_timing.get("transport", "local").upper()
+        if self._mode == "edge" and not self._edge_setup_in_progress:
+            transport = config.EDGE_TRANSPORT.upper()
+        elif self._edge_setup_in_progress:
+            transport = ""
+        else:
+            transport = "LOCAL"
         tx = 170
         cv2.putText(canvas, transport, (tx, 34),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
@@ -352,7 +368,8 @@ class EdgeVisionGUI:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
 
         # Events
-        visible_events = self._event_log[-(LOG_H // 18):]
+        max_visible = (LOG_H - 34) // 18
+        visible_events = self._event_log[-max_visible:]
         for i, (ts, icon, msg) in enumerate(visible_events):
             y = log_y + 34 + i * 18
 
@@ -590,9 +607,6 @@ class EdgeVisionGUI:
         cv2.setMouseCallback("EdgeVision", self._on_mouse)
 
         while self._running:
-            frame = self._render()
-            cv2.imshow("EdgeVision", frame)
-
             key = cv2.waitKey(30) & 0xFF
             if key == ord('q') or key == 27:
                 self._running = False
@@ -603,6 +617,11 @@ class EdgeVisionGUI:
             elif key == ord('m') or key == ord('M'):
                 self._toggle_model()
 
+            frame = self._render()
+            cv2.imshow("EdgeVision", frame)
+
+        latency_collector.stop()
+        print(f"\nLatency data saved: {latency_collector.get_output_path()}")
         modem.stop()
         if self._edge_instance_id:
             self._teardown_edge()

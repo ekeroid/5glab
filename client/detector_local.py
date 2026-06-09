@@ -16,7 +16,8 @@ from config import CONFIDENCE_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
-_model: YOLO | None = None
+from typing import Optional
+_model: Optional[YOLO] = None
 
 
 def _get_model() -> YOLO:
