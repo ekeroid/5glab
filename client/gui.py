@@ -45,6 +45,7 @@ class EdgeVisionGUI:
         self._edge_setup_in_progress = False
 
         self._event_log: list[tuple[str, str, str]] = []  # (timestamp, status_icon, message)
+        self._log_scroll_offset = 0  # 0 = pinned to bottom (latest)
         self._latency_history = deque(maxlen=200)
         self._frame_count = 0
         self._fps = 0.0
@@ -136,32 +137,39 @@ class EdgeVisionGUI:
             self._log_event("OK", f"Instance created: {instance_id[:8]}... [{ms:.0f}ms]")
 
             # Step 4: Wait for ready
-            self._log_event("..", "Waiting for GPU instance...")
+            self._log_event("..", "Waiting for GPU instance (timeout 360s)...")
             t0 = time.perf_counter()
             last_phase = ""
+            last_message = ""
             phase_start = t0
-            for _ in range(60):
+            for poll_i in range(120):
                 if self._mode != "edge":
                     self._log_event("--", "Cancelled by user")
                     return
                 detail = camara.get_instance_status(instance_id)
                 phase = detail.get("phase", "")
+                message = detail.get("message", "")
+                elapsed_s = time.perf_counter() - t0
                 if phase != last_phase:
                     if last_phase:
                         phase_ms = (time.perf_counter() - phase_start) * 1000
                         self._log_event("OK", f"  {last_phase}: {phase_ms:.0f}ms")
                     last_phase = phase
+                    last_message = message
                     phase_start = time.perf_counter()
-                    self._log_event("..", f"  {phase}: {detail.get('message', '')}")
+                    self._log_event("..", f"  {phase}: {message}")
+                elif message != last_message:
+                    last_message = message
+                    self._log_event("..", f"  {phase}: {message} [{elapsed_s:.0f}s]")
                 if detail["status"] == "ready":
                     phase_ms = (time.perf_counter() - phase_start) * 1000
                     self._log_event("OK", f"  {phase}: {phase_ms:.0f}ms")
                     break
                 elif detail["status"] == "failed":
-                    raise RuntimeError(f"Instance failed: {detail.get('message')}")
+                    raise RuntimeError(f"Instance failed: {message}")
                 time.sleep(3)
             else:
-                raise RuntimeError("Timeout waiting for instance (180s)")
+                raise RuntimeError("Timeout waiting for instance (360s)")
             total_s = time.perf_counter() - t0
             self._log_event("OK", f"Instance READY in {total_s:.1f}s")
 
@@ -358,6 +366,13 @@ class EdgeVisionGUI:
         cv2.putText(canvas, "[E] Mode [T] Transport [M] Model [Q] Quit", (WINDOW_W - 390, 34),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
 
+    def _scroll_log(self, direction: int):
+        """Scroll event log. direction: -1 = up (older), +1 = down (newer)."""
+        max_visible = (LOG_H - 34) // 18
+        total = len(self._event_log)
+        max_offset = max(0, total - max_visible)
+        self._log_scroll_offset = max(0, min(max_offset, self._log_scroll_offset - direction))
+
     def _draw_event_log(self, canvas: np.ndarray):
         log_y = BAR_H + PANEL_H
         # Background
@@ -367,9 +382,20 @@ class EdgeVisionGUI:
         cv2.putText(canvas, "CAMARA MEC LIFECYCLE", (10, log_y + 14),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
 
-        # Events
+        total = len(self._event_log)
         max_visible = (LOG_H - 34) // 18
-        visible_events = self._event_log[-max_visible:]
+        max_offset = max(0, total - max_visible)
+
+        # Auto-scroll to bottom when new events arrive (if already at bottom)
+        if self._log_scroll_offset == 0:
+            start_idx = max(0, total - max_visible)
+        else:
+            start_idx = max(0, max_offset - self._log_scroll_offset)
+
+        end_idx = min(total, start_idx + max_visible)
+        visible_events = self._event_log[start_idx:end_idx]
+
+        # Events
         for i, (ts, icon, msg) in enumerate(visible_events):
             y = log_y + 34 + i * 18
 
@@ -402,6 +428,19 @@ class EdgeVisionGUI:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, icon_colour, 1)
             cv2.putText(canvas, msg[:100], (120, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+
+        # Scrollbar
+        if total > max_visible:
+            sb_x = WINDOW_W - 8
+            sb_top = log_y + 22
+            sb_height = LOG_H - 26
+            # Track
+            cv2.rectangle(canvas, (sb_x, sb_top), (sb_x + 6, sb_top + sb_height), (40, 40, 40), -1)
+            # Thumb
+            thumb_h = max(12, int(sb_height * max_visible / total))
+            thumb_pos = int((start_idx / max(1, total - max_visible)) * (sb_height - thumb_h))
+            cv2.rectangle(canvas, (sb_x, sb_top + thumb_pos),
+                          (sb_x + 6, sb_top + thumb_pos + thumb_h), (100, 100, 100), -1)
 
     def _draw_breakdown_bar(self, canvas: np.ndarray):
         """Draw a stacked horizontal bar showing latency breakdown."""
@@ -597,6 +636,11 @@ class EdgeVisionGUI:
         if event == cv2.EVENT_LBUTTONDOWN:
             if 8 <= x <= 162 and 8 <= y <= 44:
                 self._toggle_mode()
+        elif event == cv2.EVENT_MOUSEWHEEL:
+            log_y = BAR_H + PANEL_H
+            if log_y <= y <= log_y + LOG_H:
+                direction = 1 if flags > 0 else -1
+                self._scroll_log(direction)
 
     def run(self):
         modem.start()
