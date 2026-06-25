@@ -208,7 +208,7 @@ Highlights:
 | Band | n78 (3.5 GHz) | Mid-band TDD |
 | Bandwidth | 80 MHz | |
 | Subcarrier spacing | 30 kHz (numerology 1) | Mid-band TDD default |
-| TDD pattern | DDDSU (2.5 ms) | 3 downlink, 1 special, 1 uplink per period |
+| TDD pattern | pattern 7 (sub-pattern 7) | Configured on the gNB via MOSHELL. Period 2.5 ms, DDDSU-style slot map (3 DL : 1 special : 1 UL). |
 | DRX | Disabled | For latency benchmarking |
 | Prescheduling | Enabled | Cuts P99 UL latency from 17 ms to 12 ms |
 
