@@ -1,7 +1,8 @@
 # LTH 5G Lab
 
 A working **private 5G Standalone network** with an **edge-compute
-platform** on top, used for research at Lund University (LTH /
+platform** on top, used for research at Lund University (LTH / EIT —
+Department of Electrical and Information Technology, with
 Department of Automatic Control, NextG2Com / AORTA / WARA-Ops).
 This repository contains every script, manifest, document and demo
 needed to bring the whole stack up from blank servers.
