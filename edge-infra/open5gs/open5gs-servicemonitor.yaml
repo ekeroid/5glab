@@ -1,0 +1,26 @@
+---
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: open5gs-metrics
+  namespace: monitoring
+  labels:
+    release: kube-prometheus
+spec:
+  kubernetesSDConfigs:
+    - role: Endpoints
+      namespaces:
+        names:
+          - open5gs
+  metricsPath: /metrics
+  scrapeInterval: 15s
+  relabelings:
+    - sourceLabels: [__meta_kubernetes_endpoint_port_name]
+      regex: metrics
+      action: keep
+    - sourceLabels: [__meta_kubernetes_service_name]
+      targetLabel: job
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod

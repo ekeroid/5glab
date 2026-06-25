@@ -1,0 +1,164 @@
+---
+- name: Prepare and upgrade nodes to Ubuntu 24.04
+  hosts: k8s_nodes
+  become: yes
+  serial: 7  # run all nodes in parallel
+  tasks:
+
+    - name: Enable passwordless sudo for ubuntu
+      copy:
+        dest: /etc/sudoers.d/ubuntu-nopasswd
+        content: "ubuntu ALL=(ALL) NOPASSWD:ALL\n"
+        mode: '0440'
+
+    - name: Backup fstab
+      copy:
+        src: /etc/fstab
+        dest: /etc/fstab.bak
+        remote_src: yes
+
+    - name: Comment out network/external mounts in fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\b(nfs|nfs4|cifs|smbfs|glusterfs|ceph|fuse|iso9660)\b.*)$'
+        replace: '#DISABLED_UPGRADE \1'
+
+    - name: Stop Kubernetes and container services
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - kubelet
+        - containerd
+        - docker
+        - etcd
+      ignore_errors: yes
+
+    - name: Unhold Kubernetes packages
+      command: apt-mark unhold kubelet kubeadm kubectl
+      ignore_errors: yes
+
+    - name: Remove Docker and Kubernetes apt repo files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/kubernetes.list
+        - /etc/apt/sources.list.d/download_docker_com_linux_ubuntu.list
+        - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        - /usr/share/keyrings/kubernetes-archive-keyring.gpg
+        - /usr/share/keyrings/docker-archive-keyring.gpg
+
+    - name: Remove Kubernetes and container packages
+      apt:
+        name:
+          - kubeadm
+          - kubectl
+          - kubelet
+          - kubernetes-cni
+          - containerd.io
+          - containerd
+          - docker-ce
+          - docker-ce-cli
+          - docker.io
+        state: absent
+        purge: yes
+        autoremove: yes
+      ignore_errors: yes
+
+    - name: Remove Kubernetes data directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes
+        - /var/lib/kubernetes
+        - /var/lib/kubelet
+        - /var/lib/etcd
+        - /var/lib/cni
+        - /etc/cni
+        - /opt/cni
+        - /root/.kube
+        - /home/ubuntu/.kube
+        - /var/lib/containerd
+        - /var/lib/docker
+        - /var/run/kubernetes
+        - /run/containerd
+
+    - name: Remove network interfaces left by Kubernetes
+      command: ip link delete {{ item }}
+      loop:
+        - cni0
+        - flannel.1
+        - weave
+        - kube-bridge
+      ignore_errors: yes
+
+    - name: Flush iptables rules
+      iptables:
+        flush: yes
+        table: "{{ item }}"
+      loop:
+        - filter
+        - nat
+        - mangle
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Upgrade all packages (dist-upgrade)
+      apt:
+        upgrade: dist
+
+    - name: Force full-upgrade to catch kept-back packages
+      command: apt-get -y full-upgrade
+
+    - name: Remove unused packages
+      apt:
+        autoremove: yes
+        purge: yes
+
+    - name: Install update-manager-core
+      apt:
+        name: update-manager-core
+        state: present
+
+    - name: Set release upgrade prompt to lts
+      replace:
+        path: /etc/update-manager/release-upgrades
+        regexp: '^Prompt=.*$'
+        replace: 'Prompt=lts'
+
+    - name: Check reboot-required file
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+
+    - name: Reboot if reboot-required file exists
+      reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 30
+      when: reboot_required_file.stat.exists
+
+    - name: Update apt cache after reboot
+      apt:
+        update_cache: yes
+
+    - name: Verify no packages are upgradable
+      command: apt list --upgradable
+      register: upgradable_packages
+
+    - name: Show any remaining upgradable packages
+      debug:
+        msg: "{{ upgradable_packages.stdout_lines }}"
+
+    - name: Run do-release-upgrade to Ubuntu 24.04
+      command: do-release-upgrade -f DistUpgradeViewNonInteractive
+      async: 3600
+      poll: 60
+      register: upgrade_result
+
+    - name: Show upgrade result
+      debug:
+        msg: "{{ upgrade_result.stdout_lines | default([]) + upgrade_result.stderr_lines | default([]) }}"

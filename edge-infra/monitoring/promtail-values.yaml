@@ -1,0 +1,13 @@
+# =============================================================================
+# Promtail values — ships logs from all pods to Loki
+# =============================================================================
+
+config:
+  clients:
+    - url: http://loki-gateway.monitoring.svc.cluster.local:80/loki/api/v1/push
+
+  snippets:
+    pipelineStages:
+      - cri: {}
+      - labeldrop:
+          - filename

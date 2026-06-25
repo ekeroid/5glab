@@ -1,0 +1,182 @@
+---
+# =============================================================================
+# Monitoring & Logging Stack
+#
+# Sequence:
+#   1. Create monitoring namespace
+#   2. Add Helm repos (prometheus-community, grafana)
+#   3. Install kube-prometheus-stack (Prometheus + Grafana + Alertmanager)
+#   4. Install Loki + Promtail for centralized logging
+#   5. Create ServiceMonitor for Open5GS metrics
+#   6. Verify deployment
+# =============================================================================
+- name: Deploy Monitoring and Logging Stack
+  hosts: control_plane
+  become: no
+  vars:
+    monitoring_namespace: monitoring
+    open5gs_namespace: open5gs
+    grafana_nodeport: 30300
+    prometheus_nodeport: 30090
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # Step 1 — Namespace
+    # -------------------------------------------------------------------------
+    - name: Create monitoring namespace
+      command: "kubectl create namespace {{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: ns_create
+      changed_when: "'created' in ns_create.stdout"
+      failed_when:
+        - ns_create.rc != 0
+        - "'AlreadyExists' not in ns_create.stderr"
+
+    # -------------------------------------------------------------------------
+    # Step 2 — Add Helm repos
+    # -------------------------------------------------------------------------
+    - name: Add prometheus-community Helm repo
+      command: "helm repo add prometheus-community https://prometheus-community.github.io/helm-charts"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: repo_prom
+      changed_when: "'has been added' in repo_prom.stdout"
+      failed_when:
+        - repo_prom.rc != 0
+        - "'already exists' not in repo_prom.stderr"
+
+    - name: Add grafana Helm repo
+      command: "helm repo add grafana https://grafana.github.io/helm-charts"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: repo_grafana
+      changed_when: "'has been added' in repo_grafana.stdout"
+      failed_when:
+        - repo_grafana.rc != 0
+        - "'already exists' not in repo_grafana.stderr"
+
+    - name: Update Helm repos
+      command: "helm repo update"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+
+    # -------------------------------------------------------------------------
+    # Step 3 — Install kube-prometheus-stack
+    # -------------------------------------------------------------------------
+    - name: Copy prometheus-values.yaml to control plane
+      copy:
+        src: "{{ playbook_dir }}/prometheus-values.yaml"
+        dest: "/tmp/prometheus-values.yaml"
+        mode: '0644'
+
+    - name: Install kube-prometheus-stack via Helm
+      command: >
+        helm upgrade --install kube-prometheus prometheus-community/kube-prometheus-stack
+        --namespace {{ monitoring_namespace }}
+        --values /tmp/prometheus-values.yaml
+        --timeout=10m
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: prom_install
+
+    - name: Show Prometheus stack install output
+      debug:
+        var: prom_install.stdout_lines
+
+    # -------------------------------------------------------------------------
+    # Step 4 — Install Loki + Promtail
+    # -------------------------------------------------------------------------
+    - name: Copy loki-values.yaml to control plane
+      copy:
+        src: "{{ playbook_dir }}/loki-values.yaml"
+        dest: "/tmp/loki-values.yaml"
+        mode: '0644'
+
+    - name: Install Loki via Helm
+      command: >
+        helm upgrade --install loki grafana/loki
+        --namespace {{ monitoring_namespace }}
+        --values /tmp/loki-values.yaml
+        --timeout=5m
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: loki_install
+
+    - name: Copy promtail-values.yaml to control plane
+      copy:
+        src: "{{ playbook_dir }}/promtail-values.yaml"
+        dest: "/tmp/promtail-values.yaml"
+        mode: '0644'
+
+    - name: Install Promtail via Helm
+      command: >
+        helm upgrade --install promtail grafana/promtail
+        --namespace {{ monitoring_namespace }}
+        --values /tmp/promtail-values.yaml
+        --timeout=5m
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: promtail_install
+
+    # -------------------------------------------------------------------------
+    # Step 5 — ServiceMonitor for Open5GS
+    # -------------------------------------------------------------------------
+    - name: Copy open5gs-servicemonitor.yaml to control plane
+      copy:
+        src: "{{ playbook_dir }}/open5gs-servicemonitor.yaml"
+        dest: "/tmp/open5gs-servicemonitor.yaml"
+        mode: '0644'
+
+    - name: Apply Open5GS ServiceMonitor
+      command: "kubectl apply -f /tmp/open5gs-servicemonitor.yaml"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+
+    # -------------------------------------------------------------------------
+    # Step 6 — Verify
+    # -------------------------------------------------------------------------
+    - name: Wait for Prometheus pod to be Ready
+      command: >
+        kubectl wait pods
+        --selector app.kubernetes.io/name=prometheus
+        --for=condition=Ready
+        --namespace {{ monitoring_namespace }}
+        --timeout=300s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      retries: 3
+      delay: 20
+
+    - name: Wait for Grafana pod to be Ready
+      command: >
+        kubectl wait pods
+        --selector app.kubernetes.io/name=grafana
+        --for=condition=Ready
+        --namespace {{ monitoring_namespace }}
+        --timeout=300s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      retries: 3
+      delay: 20
+
+    - name: Show all monitoring pods
+      command: "kubectl get pods -n {{ monitoring_namespace }} -o wide"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: mon_pods
+
+    - name: Print monitoring pod status
+      debug:
+        msg: "{{ mon_pods.stdout_lines }}"
+
+    - name: Show monitoring services
+      command: "kubectl get svc -n {{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: mon_svc
+
+    - name: Print monitoring services
+      debug:
+        msg: "{{ mon_svc.stdout_lines }}"

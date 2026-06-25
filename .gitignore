@@ -1,8 +1,48 @@
-__pycache__/
-*.pyc
+# Secrets and personal credentials — never check in
+edge-infra/secrets/
+edge-infra/kubeconfigs/
+clouds.yaml
+GITHUB_ACCESS_TOKEN
+access-token
+*.key
+*.pem
 .env
-output/
-*.plan
-*.onnx
-.DS_Store
+.env.*
+
+# Local Python envs
+.venv/
+**/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Model weights and large artefacts (download separately)
 *.pt
+*.onnx
+*.plan
+*.engine
+
+# Build / IDE / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Personal / one-off content (not part of the lab)
+edge-infra/docs/karl_erik_*
+edge-infra/docs/build_karl_erik_*
+
+# Local-only artefacts from running the demo
+apps/edgevision/measurements/
+apps/edgevision/output/
+*.log
+/tmp/
+
+# PowerPoint templates (huge; pull from Brand House on demand)
+Quick_guide_PPT_2025.pptx
+
+
+# Office app lock files
+~$*
+

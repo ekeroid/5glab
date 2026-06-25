@@ -1,0 +1,213 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "open5gs-5g-core",
+    "title": "5G SA Core - Open5GS",
+    "tags": ["5g", "open5gs"],
+    "timezone": "browser",
+    "refresh": "10s",
+    "time": { "from": "now-1h", "to": "now" },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Connected gNodeBs",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+        "targets": [{ "expr": "gnb", "legendFormat": "gNBs" }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": { "steps": [{"color": "red", "value": 0}, {"color": "green", "value": 1}] },
+            "color": { "mode": "thresholds" }
+          }
+        },
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+      },
+      {
+        "id": 2,
+        "title": "Registered Subscribers",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+        "targets": [{ "expr": "fivegs_amffunction_rm_registeredsubnbr", "legendFormat": "Subscribers" }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": { "steps": [{"color": "yellow", "value": 0}, {"color": "green", "value": 1}] },
+            "color": { "mode": "thresholds" }
+          }
+        },
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+      },
+      {
+        "id": 3,
+        "title": "Active PDU Sessions",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+        "targets": [{ "expr": "fivegs_smffunction_sm_sessionnbr", "legendFormat": "{{snssai}}" }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": { "steps": [{"color": "yellow", "value": 0}, {"color": "green", "value": 1}] },
+            "color": { "mode": "thresholds" }
+          }
+        },
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+      },
+      {
+        "id": 4,
+        "title": "Active QoS Flows",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+        "targets": [{ "expr": "fivegs_smffunction_sm_qos_flow_nbr", "legendFormat": "QoS Flows" }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": { "steps": [{"color": "blue", "value": 0}, {"color": "green", "value": 1}] },
+            "color": { "mode": "thresholds" }
+          }
+        },
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+      },
+      {
+        "id": 5,
+        "title": "RAN UEs",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+        "targets": [{ "expr": "ran_ue", "legendFormat": "RAN UEs" }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": { "steps": [{"color": "yellow", "value": 0}, {"color": "green", "value": 1}] },
+            "color": { "mode": "thresholds" }
+          }
+        },
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+      },
+      {
+        "id": 6,
+        "title": "AMF Sessions",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+        "targets": [{ "expr": "amf_session", "legendFormat": "Sessions" }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": { "steps": [{"color": "yellow", "value": 0}, {"color": "green", "value": 1}] },
+            "color": { "mode": "thresholds" }
+          }
+        },
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+      },
+      {
+        "id": 10,
+        "title": "Registration Requests",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+        "targets": [
+          { "expr": "rate(fivegs_amffunction_rm_reginitreq[5m])", "legendFormat": "Initial" },
+          { "expr": "rate(fivegs_amffunction_rm_regmobreq[5m])", "legendFormat": "Mobility" },
+          { "expr": "rate(fivegs_amffunction_rm_regperiodreq[5m])", "legendFormat": "Periodic" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 20 } } }
+      },
+      {
+        "id": 11,
+        "title": "Registration Success vs Failure",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+        "targets": [
+          { "expr": "rate(fivegs_amffunction_rm_reginitsucc[5m])", "legendFormat": "Success" },
+          { "expr": "rate(fivegs_amffunction_rm_reginitfail[5m])", "legendFormat": "Failure" },
+          { "expr": "rate(fivegs_amffunction_amf_authreject[5m])", "legendFormat": "Auth Reject" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 20 } } },
+        "options": {}
+      },
+      {
+        "id": 20,
+        "title": "PDU Session Creation Rate",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+        "targets": [
+          { "expr": "rate(fivegs_smffunction_sm_pdusessioncreationreq[5m])", "legendFormat": "Requested" },
+          { "expr": "rate(fivegs_smffunction_sm_pdusessioncreationsucc[5m])", "legendFormat": "Success" },
+          { "expr": "rate(fivegs_smffunction_sm_pdusessioncreationfail[5m])", "legendFormat": "Failed" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 20 } } }
+      },
+      {
+        "id": 21,
+        "title": "SMF Active Sessions & Bearers",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+        "targets": [
+          { "expr": "fivegs_smffunction_sm_sessionnbr", "legendFormat": "PDU Sessions (slice={{snssai}})" },
+          { "expr": "ues_active", "legendFormat": "Active UEs" },
+          { "expr": "bearers_active", "legendFormat": "Active Bearers" }
+        ],
+        "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 30,
+        "title": "UPF N3 Packet Rate (gNB ↔ Core)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+        "targets": [
+          { "expr": "rate(fivegs_ep_n3_gtp_indatapktn3upf[1m])", "legendFormat": "Uplink (UE→DN) pkt/s" },
+          { "expr": "rate(fivegs_ep_n3_gtp_outdatapktn3upf[1m])", "legendFormat": "Downlink (DN→UE) pkt/s" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "pps", "custom": { "drawStyle": "line", "fillOpacity": 30 } } }
+      },
+      {
+        "id": 31,
+        "title": "UPF N3 Data Volume Rate (gNB ↔ Core)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+        "targets": [
+          { "expr": "rate(fivegs_ep_n3_gtp_indatavolumeqosleveln3upf[1m])", "legendFormat": "Uplink {{qfi}} bytes/s" },
+          { "expr": "rate(fivegs_ep_n3_gtp_outdatavolumeqosleveln3upf[1m])", "legendFormat": "Downlink {{qfi}} bytes/s" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "drawStyle": "line", "fillOpacity": 30 } } }
+      },
+      {
+        "id": 40,
+        "title": "UPF Sessions & QoS Flows",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+        "targets": [
+          { "expr": "fivegs_upffunction_upf_sessionnbr", "legendFormat": "UPF Sessions" },
+          { "expr": "fivegs_upffunction_upf_qosflows", "legendFormat": "QoS Flows" }
+        ],
+        "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 41,
+        "title": "NF CPU Usage",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+        "targets": [
+          { "expr": "rate(process_cpu_seconds_total{namespace=\"open5gs\"}[1m])", "legendFormat": "{{job}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "percentunit", "custom": { "drawStyle": "line", "fillOpacity": 20 } } }
+      },
+      {
+        "id": 42,
+        "title": "NF Memory Usage",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+        "targets": [
+          { "expr": "process_resident_memory_bytes{namespace=\"open5gs\"}", "legendFormat": "{{job}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 20 } } }
+      },
+      {
+        "id": 43,
+        "title": "N4 Session Reports (SMF ↔ UPF)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+        "targets": [
+          { "expr": "rate(fivegs_smffunction_sm_n4sessionreport[5m])", "legendFormat": "SMF N4 Reports" },
+          { "expr": "rate(fivegs_upffunction_sm_n4sessionreport[5m])", "legendFormat": "UPF N4 Reports" },
+          { "expr": "rate(fivegs_upffunction_sm_n4sessionestabfail[5m])", "legendFormat": "UPF N4 Estab Fail" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } } }
+      }
+    ],
+    "schemaVersion": 39
+  },
+  "overwrite": true
+}

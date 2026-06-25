@@ -1,0 +1,204 @@
+---
+# =============================================================================
+# Longhorn v1.11.1 Installation Playbook
+#
+# Stage 1: Expand LVM on all nodes (use all free space in ubuntu-vg)
+# Stage 2: Install Longhorn prerequisites (open-iscsi, nfs-common, etc.)
+# Stage 3: Install Longhorn via Helm (3 replicas, default storage class)
+# =============================================================================
+
+
+# =============================================================================
+# PLAY 1 — Expand LVM on all nodes
+# =============================================================================
+- name: Expand LVM logical volume to use all free space
+  hosts: k8s_nodes
+  become: yes
+  tasks:
+
+    - name: Show current disk usage before expansion
+      command: df -h /
+      register: df_before
+      changed_when: false
+
+    - name: Print current disk usage
+      debug:
+        var: df_before.stdout_lines
+
+    - name: Check free space in ubuntu-vg volume group
+      command: vgs ubuntu-vg --units g --noheadings -o vg_free
+      register: vg_free
+      changed_when: false
+
+    - name: Print free space available in volume group
+      debug:
+        msg: "Free space in ubuntu-vg: {{ vg_free.stdout.strip() }}"
+
+    - name: Extend ubuntu-lv to use all free space (idempotent)
+      command: lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
+      register: lvextend_result
+      failed_when:
+        - lvextend_result.rc != 0
+        - "'matches existing size' not in lvextend_result.stderr"
+        - "'New size given' not in lvextend_result.stderr"
+      changed_when: "'Size of logical volume' in lvextend_result.stdout"
+
+    - name: Resize ext4 filesystem online to fill the LV
+      command: resize2fs /dev/mapper/ubuntu--vg-ubuntu--lv
+      register: resize_result
+      changed_when: "'Nothing to do' not in resize_result.stdout"
+
+    - name: Show disk usage after expansion
+      command: df -h /
+      register: df_after
+      changed_when: false
+
+    - name: Print new disk usage
+      debug:
+        var: df_after.stdout_lines
+
+
+# =============================================================================
+# PLAY 2 — Install Longhorn prerequisites on all nodes
+# =============================================================================
+- name: Install Longhorn prerequisites
+  hosts: k8s_nodes
+  become: yes
+  tasks:
+
+    - name: Install required packages for Longhorn
+      apt:
+        name:
+          - open-iscsi
+          - nfs-common
+          - cryptsetup
+          - dmsetup
+          - jq
+          - util-linux
+        state: present
+        update_cache: yes
+
+    - name: Enable and start iscsid service
+      systemd:
+        name: iscsid
+        enabled: yes
+        state: started
+
+    - name: Load dm_crypt kernel module
+      modprobe:
+        name: dm_crypt
+        state: present
+
+    - name: Persist dm_crypt module across reboots
+      lineinfile:
+        path: /etc/modules-load.d/longhorn.conf
+        line: dm_crypt
+        create: yes
+        mode: '0644'
+
+    - name: Check if multipath.conf exists
+      stat:
+        path: /etc/multipath.conf
+      register: multipath_conf
+
+    - name: Configure multipath to blacklist Longhorn devices
+      blockinfile:
+        path: /etc/multipath.conf
+        create: yes
+        mode: '0644'
+        marker: "# {mark} ANSIBLE MANAGED BLOCK FOR LONGHORN"
+        block: |
+          blacklist {
+              devnode "^sd[a-z0-9]+"
+          }
+
+    - name: Restart multipathd if it is running
+      systemd:
+        name: multipathd
+        state: restarted
+      ignore_errors: yes
+
+
+# =============================================================================
+# PLAY 3 — Install Longhorn via Helm
+# =============================================================================
+- name: Install Longhorn on the cluster
+  hosts: control_plane
+  become: no
+  tasks:
+
+    - name: Add Longhorn Helm repository
+      command: helm repo add longhorn https://charts.longhorn.io
+      register: helm_repo_add
+      changed_when: "'has been added' in helm_repo_add.stdout"
+      failed_when:
+        - helm_repo_add.rc != 0
+        - "'already exists' not in helm_repo_add.stderr"
+
+    - name: Update Helm repositories
+      command: helm repo update
+      changed_when: false
+
+    - name: Create longhorn-system namespace
+      command: kubectl create namespace longhorn-system
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: ns_create
+      changed_when: "'created' in ns_create.stdout"
+      failed_when:
+        - ns_create.rc != 0
+        - "'AlreadyExists' not in ns_create.stderr"
+
+    - name: Install Longhorn via Helm
+      command: >
+        helm upgrade --install longhorn longhorn/longhorn
+        --namespace longhorn-system
+        --version 1.11.1
+        --set persistence.defaultClassReplicaCount=3
+        --set defaultSettings.defaultReplicaCount=3
+        --set defaultSettings.defaultDataPath=/var/lib/longhorn
+        --set defaultSettings.replicaSoftAntiAffinity=false
+        --set defaultSettings.storageOverProvisioningPercentage=200
+        --set defaultSettings.storageMinimalAvailablePercentage=10
+        --set persistence.defaultClass=true
+        --set persistence.reclaimPolicy=Retain
+        --wait
+        --timeout=10m
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: longhorn_install
+
+    - name: Show Longhorn install output
+      debug:
+        var: longhorn_install.stdout_lines
+
+    - name: Wait for all Longhorn pods to be Ready
+      command: >
+        kubectl wait pods --all
+        --for=condition=Ready
+        --namespace longhorn-system
+        --timeout=300s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      retries: 5
+      delay: 30
+
+    - name: Show Longhorn pod status
+      command: kubectl get pods -n longhorn-system
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: longhorn_pods
+
+    - name: Print Longhorn pod status
+      debug:
+        msg: "{{ longhorn_pods.stdout_lines }}"
+
+    - name: Show storage classes
+      command: kubectl get storageclass
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: storage_classes
+
+    - name: Print storage classes
+      debug:
+        msg: "{{ storage_classes.stdout_lines }}"

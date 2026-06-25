@@ -1,0 +1,580 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: camara
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: camara-edge-api
+  namespace: camara
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: camara-job-manager
+  namespace: camara
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: camara-job-manager-binding
+  namespace: camara
+subjects:
+  - kind: ServiceAccount
+    name: camara-edge-api
+    namespace: camara
+roleRef:
+  kind: Role
+  name: camara-job-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: camara-api-code
+  namespace: camara
+data:
+  main.py: |
+    import os
+    import json
+    import ast
+    import uuid
+    import time
+    import asyncio
+    from datetime import datetime
+    from typing import Optional
+
+    from fastapi import FastAPI, HTTPException, Query
+    from fastapi.responses import JSONResponse
+    from pydantic import BaseModel
+    import httpx
+    from kubernetes import client, config
+
+    app = FastAPI(
+        title="CAMARA Simple Edge Discovery API",
+        version="0.1.0",
+        description="LTH 5G Lab - CAMARA Edge Discovery and Compute API"
+    )
+
+    # Load in-cluster Kubernetes config
+    try:
+        config.load_incluster_config()
+    except Exception:
+        config.load_kube_config()
+
+    batch_v1 = client.BatchV1Api()
+    core_v1 = client.CoreV1Api()
+
+    # In-memory job store
+    jobs_store = {}
+
+    # Edge zone definition
+    EDGE_ZONE = {
+        "edgeCloudZoneId": "lth-5glab-gpu-zone",
+        "edgeCloudZoneName": "LTH 5G Lab GPU Edge",
+        "edgeCloudProvider": "lth-kubernetes",
+        "status": "active",
+        "location": {
+            "latitude": 55.7115,
+            "longitude": 13.2108
+        },
+        "computeEndpoint": "http://camara.5glab.control.lth.se/compute/v0",
+        "capabilities": {
+            "gpuAvailable": True,
+            "gpuModel": "NVIDIA L40S",
+            "gpuCount": 2,
+            "cpuCores": 128,
+            "memoryGB": 768
+        }
+    }
+
+    # UE subnet -> gNB -> edge zone mapping
+    # Our 5G core assigns UEs from 10.45.0.0/16
+    UE_SUBNET = "10.45."
+    GNB_CELL_ID = "0x19B01"
+    AMF_SBI_URL = "http://130.235.32.171:7777"
+
+
+    async def query_amf_for_ue(device_ip: str) -> Optional[dict]:
+        """
+        Attempt to query Open5GS AMF SBI to find UE context.
+        Falls back to deterministic mapping if AMF doesn't respond.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as http_client:
+                # Try to query registered UE contexts from AMF
+                resp = await http_client.get(
+                    f"{AMF_SBI_URL}/namf-comm/v1/ue-contexts"
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception:
+            pass
+        return None
+
+
+    @app.get("/simple-edge-discovery/v0/edge-cloud-zones")
+    async def get_edge_cloud_zones(
+        device_ip: Optional[str] = Query(None, alias="device-ip")
+    ):
+        """
+        CAMARA Simple Edge Discovery - returns edge cloud zones for a device.
+        Since we have a single gNB and single edge zone, any UE on our 5G network
+        maps to our GPU edge zone.
+        """
+        # If device-ip provided, validate it belongs to our 5G network
+        if device_ip:
+            if not device_ip.startswith(UE_SUBNET):
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "code": "NOT_FOUND",
+                        "message": f"Device IP {device_ip} is not on the 5G network (expected {UE_SUBNET}x.x)"
+                    }
+                )
+            # Attempt AMF query for additional context
+            amf_data = await query_amf_for_ue(device_ip)
+
+        return {
+            "edgeCloudZones": [EDGE_ZONE]
+        }
+
+
+    @app.get("/simple-edge-discovery/v0/edge-cloud-zones/{zone_id}")
+    async def get_edge_cloud_zone(zone_id: str):
+        """Get details for a specific edge cloud zone."""
+        if zone_id != EDGE_ZONE["edgeCloudZoneId"]:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "NOT_FOUND", "message": f"Zone {zone_id} not found"}
+            )
+        return EDGE_ZONE
+
+
+    class ComputeJobRequest(BaseModel):
+        workload: str = "matrix_multiply"
+        size: int = 4096
+        iterations: int = 10
+
+
+    @app.post("/compute/v0/jobs")
+    async def create_compute_job(req: ComputeJobRequest):
+        """
+        Submit a GPU compute job to the edge cloud zone.
+        Creates a Kubernetes Job on the GPU node.
+        """
+        job_id = f"edge-compute-{uuid.uuid4().hex[:8]}"
+
+        # Build the GPU workload script
+        gpu_script = (
+            "import torch, time, json, sys\n"
+            "device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n"
+            "device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'\n"
+            f"size = {req.size}\n"
+            f"iterations = {req.iterations}\n"
+            "a = torch.randn(size, size, device=device)\n"
+            "b = torch.randn(size, size, device=device)\n"
+            "torch.matmul(a, b)\n"
+            "if device.type == 'cuda': torch.cuda.synchronize()\n"
+            "start = time.time()\n"
+            "for i in range(iterations): c = torch.matmul(a, b)\n"
+            "if device.type == 'cuda': torch.cuda.synchronize()\n"
+            "elapsed = time.time() - start\n"
+            "flops = 2 * (size ** 3) * iterations\n"
+            "gflops = flops / elapsed / 1e9\n"
+            "out = json.dumps({'elapsed_s': round(elapsed, 4), 'gflops': round(gflops, 1), "
+            "'backend': 'gpu' if device.type == 'cuda' else 'cpu', "
+            "'device': device_name, 'size': size, 'iterations': iterations})\n"
+            "sys.stdout.write(out + '\\n')\n"
+            "sys.stdout.flush()\n"
+        )
+
+        # Create K8s Job spec
+        job_manifest = client.V1Job(
+            api_version="batch/v1",
+            kind="Job",
+            metadata=client.V1ObjectMeta(
+                name=job_id,
+                namespace="camara",
+                labels={"app": "camara-compute", "job-id": job_id}
+            ),
+            spec=client.V1JobSpec(
+                ttl_seconds_after_finished=300,
+                backoff_limit=1,
+                template=client.V1PodTemplateSpec(
+                    metadata=client.V1ObjectMeta(
+                        labels={"app": "camara-compute", "job-id": job_id}
+                    ),
+                    spec=client.V1PodSpec(
+                        restart_policy="Never",
+                        tolerations=[
+                            client.V1Toleration(
+                                key="nvidia.com/gpu",
+                                operator="Equal",
+                                value="true",
+                                effect="NoSchedule"
+                            ),
+                            client.V1Toleration(
+                                key="node.kubernetes.io/disk-pressure",
+                                operator="Exists",
+                                effect="NoSchedule"
+                            )
+                        ],
+                        node_selector={"nvidia.com/gpu": "true"},
+                        containers=[
+                            client.V1Container(
+                                name="gpu-compute",
+                                image="nvcr.io/nvidia/pytorch:24.12-py3",
+                                image_pull_policy="IfNotPresent",
+                                command=["python", "-c", gpu_script],
+                                resources=client.V1ResourceRequirements(
+                                    limits={"nvidia.com/gpu": "1"},
+                                    requests={"nvidia.com/gpu": "1"}
+                                )
+                            )
+                        ]
+                    )
+                )
+            )
+        )
+
+        try:
+            batch_v1.create_namespaced_job(namespace="camara", body=job_manifest)
+        except client.exceptions.ApiException as e:
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "JOB_CREATION_FAILED", "message": str(e.reason)}
+            )
+
+        jobs_store[job_id] = {
+            "jobId": job_id,
+            "status": "pending",
+            "createdAt": datetime.utcnow().isoformat() + "Z",
+            "request": req.dict(),
+            "result": None
+        }
+
+        # Poll for completion in background
+        asyncio.create_task(_poll_job(job_id))
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                "jobId": job_id,
+                "status": "pending",
+                "message": "Job submitted to GPU edge node"
+            }
+        )
+
+
+    async def _poll_job(job_id: str, timeout: int = 300):
+        """Poll a K8s job until it completes or times out."""
+        start = time.time()
+        while time.time() - start < timeout:
+            await asyncio.sleep(3)
+            try:
+                job = batch_v1.read_namespaced_job(name=job_id, namespace="camara")
+                if job.status.succeeded and job.status.succeeded >= 1:
+                    # Get pod logs
+                    pods = core_v1.list_namespaced_pod(
+                        namespace="camara",
+                        label_selector=f"job-name={job_id}"
+                    )
+                    if pods.items:
+                        log = core_v1.read_namespaced_pod_log(
+                            name=pods.items[0].metadata.name,
+                            namespace="camara"
+                        )
+                        last_line = log.strip().split('\n')[-1]
+                        try:
+                            result = json.loads(last_line)
+                        except (json.JSONDecodeError, IndexError, TypeError):
+                            try:
+                                fixed = last_line.replace("'", '"').replace("True", "true").replace("False", "false")
+                                result = json.loads(fixed)
+                            except (json.JSONDecodeError, ValueError):
+                                try:
+                                    result = ast.literal_eval(last_line)
+                                except (ValueError, SyntaxError):
+                                    result = {"raw_output": log[-2000:]}
+
+                        jobs_store[job_id]["status"] = "completed"
+                        jobs_store[job_id]["result"] = result
+                    return
+                elif job.status.failed and job.status.failed >= 1:
+                    # Get pod logs for error info
+                    pods = core_v1.list_namespaced_pod(
+                        namespace="camara",
+                        label_selector=f"job-name={job_id}"
+                    )
+                    error_log = ""
+                    if pods.items:
+                        try:
+                            error_log = core_v1.read_namespaced_pod_log(
+                                name=pods.items[0].metadata.name,
+                                namespace="camara"
+                            )
+                        except Exception:
+                            error_log = "Could not retrieve logs"
+
+                    jobs_store[job_id]["status"] = "failed"
+                    jobs_store[job_id]["result"] = {"error": error_log[-1000:]}
+                    return
+            except Exception:
+                pass
+
+        jobs_store[job_id]["status"] = "timeout"
+
+
+    @app.get("/compute/v0/jobs/{job_id}")
+    async def get_compute_job(job_id: str):
+        """Get status and result of a compute job."""
+        if job_id in jobs_store:
+            return jobs_store[job_id]
+
+        # Try to find it in K8s
+        try:
+            job = batch_v1.read_namespaced_job(name=job_id, namespace="camara")
+            status = "pending"
+            result = None
+            if job.status.succeeded and job.status.succeeded >= 1:
+                status = "completed"
+                pods = core_v1.list_namespaced_pod(
+                    namespace="camara",
+                    label_selector=f"job-name={job_id}"
+                )
+                if pods.items:
+                    try:
+                        log = core_v1.read_namespaced_pod_log(
+                            name=pods.items[0].metadata.name,
+                            namespace="camara"
+                        )
+                        last_line = log.strip().split('\n')[-1]
+                        try:
+                            result = json.loads(last_line)
+                        except (json.JSONDecodeError, TypeError):
+                            fixed = last_line.replace("'", '"').replace("True", "true").replace("False", "false")
+                            result = json.loads(fixed)
+                    except Exception:
+                        result = {"raw_output": log[-500:] if log else "no output"}
+            elif job.status.failed and job.status.failed >= 1:
+                status = "failed"
+            elif job.status.active and job.status.active >= 1:
+                status = "running"
+            return {"jobId": job_id, "status": status, "result": result}
+        except client.exceptions.ApiException:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "NOT_FOUND", "message": f"Job {job_id} not found"}
+            )
+
+
+    @app.get("/compute/v0/jobs")
+    async def list_compute_jobs():
+        """List all compute jobs."""
+        return {"jobs": list(jobs_store.values())}
+
+
+    @app.get("/health")
+    async def health():
+        return {"status": "healthy", "service": "camara-edge-discovery"}
+
+
+    @app.get("/")
+    async def root():
+        return {
+            "service": "CAMARA Simple Edge Discovery API",
+            "version": "0.1.0",
+            "endpoints": [
+                "/simple-edge-discovery/v0/edge-cloud-zones",
+                "/compute/v0/jobs",
+                "/health"
+            ]
+        }
+
+  requirements.txt: |
+    fastapi==0.111.0
+    uvicorn[standard]==0.30.1
+    httpx==0.27.0
+    kubernetes==29.0.0
+    pydantic==2.7.1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: camara-gpu-workload
+  namespace: camara
+data:
+  matrix_bench.py: |
+    import torch
+    import time
+    import json
+    import sys
+    import os
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'
+
+    size = int(os.environ.get('MATRIX_SIZE', '4096'))
+    iterations = int(os.environ.get('ITERATIONS', '10'))
+
+    # Warmup
+    a = torch.randn(size, size, device=device)
+    b = torch.randn(size, size, device=device)
+    torch.matmul(a, b)
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+
+    # Benchmark
+    start = time.time()
+    for i in range(iterations):
+        c = torch.matmul(a, b)
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    elapsed = time.time() - start
+
+    # Calculate GFLOPS
+    flops = 2 * (size ** 3) * iterations
+    gflops = flops / elapsed / 1e9
+
+    result = {
+        "elapsed_s": round(elapsed, 4),
+        "gflops": round(gflops, 1),
+        "backend": "gpu" if device.type == "cuda" else "cpu",
+        "device": device_name,
+        "size": size,
+        "iterations": iterations
+    }
+    print(json.dumps(result))
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camara-edge-api
+  namespace: camara
+  labels:
+    app: camara-edge-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camara-edge-api
+  template:
+    metadata:
+      labels:
+        app: camara-edge-api
+    spec:
+      serviceAccountName: camara-edge-api
+      containers:
+        - name: api
+          image: python:3.12-slim
+          command:
+            - /bin/bash
+            - -c
+            - |
+              pip install --no-cache-dir -r /app/requirements.txt && \
+              uvicorn main:app --host 0.0.0.0 --port 8080
+          workingDir: /app
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          volumeMounts:
+            - name: api-code
+              mountPath: /app
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 15
+      volumes:
+        - name: api-code
+          configMap:
+            name: camara-api-code
+            items:
+              - key: main.py
+                path: main.py
+              - key: requirements.txt
+                path: requirements.txt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: camara-edge-api
+  namespace: camara
+  labels:
+    app: camara-edge-api
+spec:
+  selector:
+    app: camara-edge-api
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+---
+# ReferenceGrant: allow the HTTPRoute in monitoring namespace to reference
+# the Service in camara namespace
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-monitoring-to-camara
+  namespace: camara
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: monitoring
+  to:
+    - group: ""
+      kind: Service
+---
+# HTTPRoute in monitoring namespace (where the gateway lives, since allowedRoutes=Same)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: camara-edge-api
+  namespace: monitoring
+spec:
+  parentRefs:
+    - name: lab-gateway
+      namespace: monitoring
+  hostnames:
+    - "camara.5glab.control.lth.se"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: camara-edge-api
+          namespace: camara
+          port: 80

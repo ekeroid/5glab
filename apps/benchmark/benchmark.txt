@@ -1,0 +1,112 @@
+
+
+The benchmark setup:                                                               
+                                                                                                                   
+  Server: Deployed in k8s (open5gs namespace) via ConfigMap — benchmark-server.py                                  
+                                                                                                                   
+  Client: Runs locally — benchmark-client.py                                                                       
+                                                                                                                   
+  Connection: SSH tunnel (localhost:9900 → k8s service)                                                            
+ 
+  ┌───────────────────────┬──────────────────────────────────────┐
+  │         File          │               Purpose                │
+  ├───────────────────────┼──────────────────────────────────────┤                                                    
+  │ benchmark-server.py   │ Server code (deployed via ConfigMap) │
+  ├───────────────────────┼──────────────────────────────────────┤                                                    
+  │ benchmark-deploy.yaml │ Kubernetes Deployment + Service      │                                                    
+  ├───────────────────────┼──────────────────────────────────────┤
+  │ benchmark-client.py   │ Client (runs on your laptop)         │                         
+  └───────────────────────┴──────────────────────────────────────┘
+                                                            
+  Available profiles:                                                                                              
+                                                                                                                   
+  ┌─────────────────┬──────────────────────────────┐                                                               
+  │     Profile     │         Description          │        
+  ├─────────────────┼──────────────────────────────┤                                                               
+  │ latency-small   │ 64-byte ping/pong (pure RTT) │        
+  ├─────────────────┼──────────────────────────────┤                                                               
+  ├─────────────────┼──────────────────────────────┤
+  │ latency-medium  │ 1KB ping/pong                │
+  ├─────────────────┼──────────────────────────────┤
+  │ latency-large   │ 8KB ping/pong                │
+  ├─────────────────┼──────────────────────────────┤
+  │ throughput-down │ Download 64KB chunks         │
+  ├─────────────────┼──────────────────────────────┤
+  │ throughput-up   │ Upload 64KB chunks           │
+  ├─────────────────┼──────────────────────────────┤
+  │ mixed           │ All three phases combined    │
+  └─────────────────┴──────────────────────────────┘
+
+  Usage:
+  python3 benchmark-client.py 127.0.0.1 9900 <profile> <duration_seconds>
+
+  Note: these results measure laptop → SSH tunnel → k8s pod latency (~5ms RTT, ~45-50 Mbps). To benchmark the actual 5G radio path, the client would need to run on the UE itself, not through the SSH tunnel. The tunnel measures the infrastructure backhaul, not the air interface.
+
+---------------------------------------------------------------
+
+
+Terminal #1
+
+% ssh -i ~/.ssh/5G-lab-2026 -L 9900:10.97.140.225:9900 ubuntu@130.235.32.171 -N
+
+---------------------------------------------------------------
+Terminal #2
+
+% python3 benchmark-client.py 127.0.0.1 9900 latency-small 10
+============================================================
+  5G Core Benchmark
+  Server:   127.0.0.1:9900
+  Profile:  latency-small
+  Duration: 10s
+============================================================
+  Connected.
+  Payload:  64 bytes
+
+  RTT (64B payload) (1982 samples):
+    Mean:      5.03 ms
+    P75:       5.42 ms
+    P95:       7.64 ms
+    P99:      10.87 ms
+    Min:       2.92 ms
+    Max:      18.99 ms
+
+============================================================
+  Benchmark complete.
+============================================================
+(.venv) EJOHEKE@EMB-7HHQG3FQ 5G-setup-2026 % python3 benchmark-client.py 127.0.0.1 9900 mixed 50        
+============================================================
+  5G Core Benchmark
+  Server:   127.0.0.1:9900
+  Profile:  mixed
+  Duration: 50s
+============================================================
+  Connected.
+  Running mixed workload...
+
+  --- Phase 1: Latency (64B, 16s) ---
+
+  RTT (64B) (3036 samples):
+    Mean:      5.26 ms
+    P75:       5.75 ms
+    P95:       7.79 ms
+    P99:      10.62 ms
+    Min:       3.15 ms
+    Max:      37.26 ms
+
+  --- Phase 2: Download (64KB chunks, 16s) ---
+
+  Download (1317 transfers):
+    Throughput:    43.21 Mbps
+    Total:      82.31 MB in 15.98s
+    Latency mean: 12.13 ms/chunk
+
+  --- Phase 3: Upload (64KB chunks, 16s) ---
+
+  Upload (1298 transfers):
+    Throughput:    42.67 Mbps
+    Total:      81.12 MB in 15.95s
+    Latency mean: 12.29 ms/chunk
+
+============================================================
+  Benchmark complete.
+============================================================

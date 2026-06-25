@@ -1,0 +1,185 @@
+# =============================================================================
+# Open5GS values.yaml for Gradiant chart v2.2.6 (appVersion 2.7.2)
+# Mode: 5G SA only (4G EPC disabled)
+# Network: BB6651 G3 Ericsson gNB on 192.168.0.0/24
+# PLMN: MCC=001, MNC=01, TAC=1, Network Name=LTH_5G
+# Storage: External MongoDB 6 (deployed via mongodb.yaml) backed by Longhorn
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Use external MongoDB (deployed separately via mongodb.yaml)
+# Set dbURI both at top level AND in each subchart that connects to MongoDB
+# -----------------------------------------------------------------------------
+mongodb:
+  enabled: false              # disable the chart's bundled (Bitnami) MongoDB
+
+# Top-level dbURI used by populate / webui
+dbURI: "mongodb://mongodb-svc:27017/open5gs"
+
+# -----------------------------------------------------------------------------
+# Disable all 4G EPC components — we only need the 5G SA core
+# -----------------------------------------------------------------------------
+mme:
+  enabled: false
+hss:
+  enabled: false
+sgwc:
+  enabled: false
+sgwu:
+  enabled: false
+pcrf:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# 5G SA Core Network Functions
+# Each NF that touches MongoDB needs its own dbURI override
+# -----------------------------------------------------------------------------
+amf:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+  mcc: '001'
+  mnc: '01'
+  tac: 1
+  network_name: LTH_5G
+  metrics:
+    enabled: true
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  nodeSelector:
+    kubernetes.io/hostname: "k8sv2-1.eit.lth.se"
+  customOpen5gsConfig:
+    logger:
+      level: info
+    global:
+      max:
+        ue: 1024
+        peer: 64
+    amf:
+      sbi:
+        server:
+          - address: 192.168.0.201
+            port: 7777
+        client:
+          scp:
+            - uri: http://open5gs-scp-sbi.open5gs.svc.cluster.local:7777
+      ngap:
+        server:
+          - address: 192.168.0.201
+      metrics:
+        server:
+          - address: 192.168.0.201
+            port: 9090
+      guami:
+        - plmn_id:
+            mcc: "001"
+            mnc: "01"
+          amf_id:
+            region: 2
+            set: 1
+      tai:
+        - plmn_id:
+            mcc: "001"
+            mnc: "01"
+          tac: [1]
+      plmn_support:
+        - plmn_id:
+            mcc: "001"
+            mnc: "01"
+          s_nssai:
+            - sst: 1
+      security:
+        integrity_order: [NIA2, NIA1, NIA0]
+        ciphering_order: [NEA0, NEA1, NEA2]
+      network_name:
+        full: "LTH_5G"
+      amf_name: open5gs-amf
+      time:
+        t3512:
+          value: 540
+
+smf:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+  metrics:
+    enabled: true
+  config:
+    pcrf:
+      enabled: false
+
+upf:
+  enabled: true
+  metrics:
+    enabled: true
+  advertiseIP: "192.168.0.201"
+  containerSecurityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    privileged: true
+    capabilities:
+      add:
+        - NET_ADMIN
+
+nrf:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+  metrics:
+    enabled: true
+  config:
+    mcc: '001'
+    mnc: '01'
+
+ausf:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+
+udm:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+
+udr:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+
+pcf:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+  mongodb:
+    enabled: false
+
+nssf:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+
+bsf:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+
+scp:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+
+# -----------------------------------------------------------------------------
+# WebUI for subscriber management
+# -----------------------------------------------------------------------------
+webui:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+  service:
+    type: NodePort
+    nodePort: 30999
+    port: 9999
+  ingress:
+    enabled: false
+  initImage:
+    repository: mongo
+    tag: "4.4"
+
+# -----------------------------------------------------------------------------
+# Auto-populate one initial test subscriber
+# Update IMSI/KEY/OPC to match your test SIM card
+# -----------------------------------------------------------------------------
+populate:
+  enabled: true
+  dbURI: "mongodb://mongodb-svc:27017/open5gs"
+  initCommands:
+    - open5gs-dbctl add_ue_with_slice 001010000000001 465B5CE8B199B49FAA5F0A2EE238A6BC E8ED289DEBA952E4283B54E88E6183CA internet 1

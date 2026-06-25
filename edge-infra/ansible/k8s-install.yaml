@@ -1,0 +1,445 @@
+---
+# =============================================================================
+# Kubernetes 1.35.3 Cluster Installation Playbook
+# Ubuntu 24.04 LTS | Calico v3.31.5 | Multus (thick) | Helm
+# Control plane : k8sv2-1.eit.lth.se (130.235.32.171)
+# Workers       : k8sv2-2 through k8sv2-7
+# Pod CIDR      : 10.244.0.0/16  (avoids clash with 192.168.0.0/24 gNB network)
+# Service CIDR  : 10.96.0.0/12   (kubeadm default)
+# =============================================================================
+
+
+# =============================================================================
+# PLAY 1 — Prepare ALL nodes
+# =============================================================================
+- name: Prepare all nodes for Kubernetes
+  hosts: k8s_nodes
+  become: yes
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # Swap
+    # -------------------------------------------------------------------------
+    - name: Disable swap immediately
+      command: swapoff -a
+      changed_when: false
+
+    - name: Remove swap from fstab permanently
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\s+swap\s+.*)$'
+        replace: '# \1'
+
+    # -------------------------------------------------------------------------
+    # Kernel modules
+    # -------------------------------------------------------------------------
+    - name: Create kernel modules config for Kubernetes
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+          sctp
+        mode: '0644'
+
+    - name: Load overlay module
+      modprobe:
+        name: overlay
+        state: present
+
+    - name: Load br_netfilter module
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Load sctp module (required for Ericsson gNB N2 interface)
+      modprobe:
+        name: sctp
+        state: present
+
+    # -------------------------------------------------------------------------
+    # Sysctl
+    # -------------------------------------------------------------------------
+    - name: Set sysctl params for Kubernetes networking
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+        mode: '0644'
+
+    - name: Apply sysctl settings
+      command: sysctl --system
+      changed_when: false
+
+    # -------------------------------------------------------------------------
+    # containerd
+    # -------------------------------------------------------------------------
+    - name: Install containerd and dependencies
+      apt:
+        name:
+          - containerd
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - iproute2
+          - iputils-ping
+          - tcpdump
+          - jq
+        state: present
+        update_cache: yes
+
+    - name: Create containerd config directory
+      file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+
+    - name: Generate default containerd config
+      shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    - name: Enable SystemdCgroup in containerd config
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+
+    - name: Set correct sandbox image for Kubernetes 1.35
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'sandbox_image = ".*"'
+        replace: 'sandbox_image = "registry.k8s.io/pause:3.10"'
+
+    - name: Restart and enable containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Configure crictl to use containerd
+      copy:
+        dest: /etc/crictl.yaml
+        content: |
+          runtime-endpoint: unix:///run/containerd/containerd.sock
+          image-endpoint: unix:///run/containerd/containerd.sock
+          timeout: 10
+          debug: false
+        mode: '0644'
+
+    # -------------------------------------------------------------------------
+    # Kubernetes apt repository
+    # -------------------------------------------------------------------------
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Kubernetes apt signing key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.35/deb/Release.key | \
+        gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.35/deb/ /
+        mode: '0644'
+
+    # -------------------------------------------------------------------------
+    # Install Kubernetes components
+    # -------------------------------------------------------------------------
+    - name: Update apt cache after adding Kubernetes repo
+      apt:
+        update_cache: yes
+
+    - name: Install kubelet, kubeadm and kubectl
+      apt:
+        name:
+          - kubelet=1.35.3-1.1
+          - kubeadm=1.35.3-1.1
+          - kubectl=1.35.3-1.1
+        state: present
+
+    - name: Hold Kubernetes packages at current version
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Enable and start kubelet
+      systemd:
+        name: kubelet
+        enabled: yes
+        state: started
+
+
+# =============================================================================
+# PLAY 2 — Initialize control plane
+# =============================================================================
+- name: Initialize Kubernetes control plane
+  hosts: control_plane
+  become: yes
+  tasks:
+
+    - name: Check if Kubernetes is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_initialized
+
+    - name: Initialize Kubernetes cluster with kubeadm
+      command: >
+        kubeadm init
+        --pod-network-cidr=10.244.0.0/16
+        --apiserver-advertise-address=130.235.32.171
+        --kubernetes-version=v1.35.3
+        --node-name=k8sv2-1.eit.lth.se
+        --service-cidr=10.96.0.0/12
+      when: not kubeadm_initialized.stat.exists
+      register: kubeadm_init_output
+
+    - name: Show kubeadm init output
+      debug:
+        var: kubeadm_init_output.stdout_lines
+      when: kubeadm_init_output is changed
+
+    # -------------------------------------------------------------------------
+    # kubectl config for ubuntu user
+    # -------------------------------------------------------------------------
+    - name: Create .kube directory for ubuntu user
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Copy admin.conf to ubuntu user kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        remote_src: yes
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+
+    - name: Create .kube directory for root user
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0755'
+
+    - name: Copy admin.conf to root user kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: yes
+        mode: '0600'
+
+    # -------------------------------------------------------------------------
+    # Install Helm on control plane
+    # -------------------------------------------------------------------------
+    - name: Download Helm install script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get-helm-3.sh
+        mode: '0700'
+
+    - name: Install Helm
+      command: /tmp/get-helm-3.sh
+      args:
+        creates: /usr/local/bin/helm
+
+    # -------------------------------------------------------------------------
+    # Install Calico v3.31.5 via Tigera Operator
+    # -------------------------------------------------------------------------
+    - name: Apply Tigera operator manifest
+      become: no
+      command: >
+        kubectl apply -f
+        https://raw.githubusercontent.com/projectcalico/calico/v3.31.5/manifests/tigera-operator.yaml
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+
+    - name: Wait for Tigera operator to be ready
+      become: no
+      command: >
+        kubectl rollout status deployment/tigera-operator
+        -n tigera-operator --timeout=120s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      retries: 5
+      delay: 15
+
+    - name: Create Calico Installation manifest
+      copy:
+        dest: /tmp/calico-installation.yaml
+        content: |
+          apiVersion: operator.tigera.io/v1
+          kind: Installation
+          metadata:
+            name: default
+          spec:
+            calicoNetwork:
+              ipPools:
+              - name: default-ipv4-ippool
+                blockSize: 26
+                cidr: 10.244.0.0/16
+                encapsulation: VXLANCrossSubnet
+                natOutgoing: Enabled
+                nodeSelector: all()
+          ---
+          apiVersion: operator.tigera.io/v1
+          kind: APIServer
+          metadata:
+            name: default
+          spec: {}
+        mode: '0644'
+
+    - name: Apply Calico Installation
+      become: no
+      command: kubectl apply -f /tmp/calico-installation.yaml
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+
+    - name: Wait for Calico to be ready (all calico-node pods Running)
+      become: no
+      command: >
+        kubectl wait pods
+        --selector k8s-app=calico-node
+        --for=condition=Ready
+        --namespace=calico-system
+        --timeout=180s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      retries: 6
+      delay: 20
+
+    # -------------------------------------------------------------------------
+    # Install Multus CNI (thick plugin)
+    # -------------------------------------------------------------------------
+    - name: Apply Multus thick daemonset
+      become: no
+      command: >
+        kubectl apply -f
+        https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/master/deployments/multus-daemonset-thick.yml
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+
+    - name: Wait for Multus daemonset to be ready
+      become: no
+      command: >
+        kubectl rollout status daemonset/kube-multus-ds
+        -n kube-system --timeout=120s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      retries: 5
+      delay: 15
+
+    # -------------------------------------------------------------------------
+    # Generate join command for worker nodes
+    # -------------------------------------------------------------------------
+    - name: Generate kubeadm join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+
+    - name: Store join command as fact
+      set_fact:
+        kubeadm_join_command: "{{ join_command.stdout }}"
+
+    - name: Save join command to file for reference
+      copy:
+        content: "{{ join_command.stdout }}"
+        dest: /tmp/kubeadm_join_command.sh
+        mode: '0700'
+
+
+# =============================================================================
+# PLAY 3 — Join worker nodes
+# =============================================================================
+- name: Join worker nodes to the cluster
+  hosts: workers
+  become: yes
+  tasks:
+
+    - name: Check if node is already joined
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: node_joined
+
+    - name: Get join command from control plane
+      set_fact:
+        kubeadm_join_command: "{{ hostvars['k8sv2-1.eit.lth.se']['kubeadm_join_command'] }}"
+
+    - name: Join worker node to cluster
+      command: "{{ kubeadm_join_command }}"
+      when: not node_joined.stat.exists
+      register: join_output
+
+    - name: Show join output
+      debug:
+        var: join_output.stdout_lines
+      when: join_output is changed
+
+
+# =============================================================================
+# PLAY 4 — Verify cluster and label worker nodes
+# =============================================================================
+- name: Verify cluster health and label workers
+  hosts: control_plane
+  become: no
+  tasks:
+
+    - name: Wait for all nodes to be Ready
+      command: >
+        kubectl wait nodes --all
+        --for=condition=Ready
+        --timeout=300s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      retries: 5
+      delay: 20
+
+    - name: Label worker nodes
+      command: "kubectl label node {{ item }} node-role.kubernetes.io/worker=worker --overwrite"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      loop:
+        - k8sv2-2.eit.lth.se
+        - k8sv2-3.eit.lth.se
+        - k8sv2-4.eit.lth.se
+        - k8sv2-5.eit.lth.se
+        - k8sv2-6.eit.lth.se
+        - k8sv2-7.eit.lth.se
+
+    - name: Show cluster node status
+      command: kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: node_status
+
+    - name: Print node status
+      debug:
+        msg: "{{ node_status.stdout_lines }}"
+
+    - name: Show all system pods
+      command: kubectl get pods -A
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: pod_status
+
+    - name: Print pod status
+      debug:
+        msg: "{{ pod_status.stdout_lines }}"

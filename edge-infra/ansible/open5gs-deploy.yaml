@@ -1,0 +1,187 @@
+---
+# =============================================================================
+# Open5GS Deployment via Gradiant Helm Chart
+#
+# Sequence:
+#   1. Uninstall any prior Open5GS Helm release (clean slate)
+#   2. Create open5gs namespace
+#   3. Apply mongodb.yaml (PVC + Service + Deployment, mongo:6.0)
+#   4. Wait for MongoDB to be Ready
+#   5. Helm install Open5GS pointing at mongodb-svc
+#   6. Wait for all NF pods to be Ready
+# =============================================================================
+- name: Deploy Open5GS using Gradiant Helm chart
+  hosts: control_plane
+  become: no
+  vars:
+    open5gs_namespace: open5gs
+    chart_version: "2.2.6"
+    chart_ref: "oci://registry-1.docker.io/gradiant/open5gs"
+    values_file_local: "{{ playbook_dir }}/open5gs-values.yaml"
+    values_file_remote: "/tmp/open5gs-values.yaml"
+    mongodb_manifest_local: "{{ playbook_dir }}/mongodb.yaml"
+    mongodb_manifest_remote: "/tmp/mongodb.yaml"
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # Step 1 — Clean slate: uninstall any previous Open5GS release
+    # -------------------------------------------------------------------------
+    - name: Uninstall previous Open5GS Helm release if present
+      command: "helm uninstall open5gs --namespace {{ open5gs_namespace }} --wait --timeout=5m"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: helm_uninstall
+      failed_when:
+        - helm_uninstall.rc != 0
+        - "'not found' not in helm_uninstall.stderr"
+      changed_when: "'uninstalled' in helm_uninstall.stdout"
+
+    # -------------------------------------------------------------------------
+    # Step 2 — Namespace
+    # -------------------------------------------------------------------------
+    - name: Create open5gs namespace
+      command: "kubectl create namespace {{ open5gs_namespace }}"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: ns_create
+      changed_when: "'created' in ns_create.stdout"
+      failed_when:
+        - ns_create.rc != 0
+        - "'AlreadyExists' not in ns_create.stderr"
+
+    # -------------------------------------------------------------------------
+    # Step 3 — Deploy standalone MongoDB 6.0
+    # -------------------------------------------------------------------------
+    - name: Copy mongodb.yaml to control plane
+      copy:
+        src: "{{ mongodb_manifest_local }}"
+        dest: "{{ mongodb_manifest_remote }}"
+        mode: '0644'
+
+    - name: Apply mongodb.yaml manifest
+      command: "kubectl apply -f {{ mongodb_manifest_remote }}"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: mongo_apply
+
+    - name: Show kubectl apply output
+      debug:
+        var: mongo_apply.stdout_lines
+
+    # -------------------------------------------------------------------------
+    # Step 4 — Wait for MongoDB to be Ready before installing Open5GS
+    # -------------------------------------------------------------------------
+    - name: Wait for MongoDB pod to be Ready
+      command: >
+        kubectl wait pods
+        --selector app=mongodb
+        --for=condition=Ready
+        --namespace {{ open5gs_namespace }}
+        --timeout=300s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      retries: 5
+      delay: 20
+
+    - name: Show MongoDB pod status
+      command: "kubectl get pods,svc,pvc -n {{ open5gs_namespace }} -l app=mongodb"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: mongo_status
+
+    - name: Print MongoDB status
+      debug:
+        msg: "{{ mongo_status.stdout_lines }}"
+
+    # -------------------------------------------------------------------------
+    # Step 5 — Helm install Open5GS
+    # -------------------------------------------------------------------------
+    - name: Copy open5gs-values.yaml to control plane
+      copy:
+        src: "{{ values_file_local }}"
+        dest: "{{ values_file_remote }}"
+        mode: '0644'
+
+    - name: Install/upgrade Open5GS via Helm
+      command: >
+        helm upgrade --install open5gs {{ chart_ref }}
+        --version {{ chart_version }}
+        --namespace {{ open5gs_namespace }}
+        --values {{ values_file_remote }}
+        --timeout=10m
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: helm_install
+
+    - name: Show Helm install output
+      debug:
+        var: helm_install.stdout_lines
+
+    # -------------------------------------------------------------------------
+    # Step 5b — Patch AMF for hostNetwork on control plane node
+    # -------------------------------------------------------------------------
+    - name: Patch AMF deployment for hostNetwork
+      command: >
+        kubectl patch deployment open5gs-amf -n {{ open5gs_namespace }}
+        --type='json'
+        -p='[{"op":"add","path":"/spec/template/spec/hostNetwork","value":true},{"op":"add","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirstWithHostNet"},{"op":"add","path":"/spec/template/spec/nodeSelector","value":{"kubernetes.io/hostname":"k8sv2-1.eit.lth.se"}},{"op":"add","path":"/spec/template/spec/tolerations","value":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"}]},{"op":"replace","path":"/spec/template/spec/securityContext","value":{"fsGroup":0}},{"op":"replace","path":"/spec/template/spec/containers/0/securityContext","value":{"runAsUser":0,"runAsNonRoot":false}},{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe","value":{"tcpSocket":{"host":"192.168.0.201","port":7777},"initialDelaySeconds":10,"periodSeconds":5,"timeoutSeconds":1,"failureThreshold":5}},{"op":"replace","path":"/spec/template/spec/containers/0/livenessProbe","value":{"tcpSocket":{"host":"192.168.0.201","port":7777},"initialDelaySeconds":30,"periodSeconds":10,"timeoutSeconds":5,"failureThreshold":5}}]'
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+
+    # -------------------------------------------------------------------------
+    # Step 5c — Patch WebUI init container (chart hardcodes a removed image)
+    # -------------------------------------------------------------------------
+    - name: Patch WebUI deployment to use mongo:4.4 init image
+      command: >
+        kubectl patch deployment open5gs-webui -n {{ open5gs_namespace }}
+        --type='json'
+        -p='[{"op":"replace","path":"/spec/template/spec/initContainers/0/image","value":"mongo:4.4"}]'
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: webui_patch
+      failed_when:
+        - webui_patch.rc != 0
+        - "'not found' not in webui_patch.stderr"
+
+    - name: Patch WebUI service to NodePort
+      command: >
+        kubectl patch svc open5gs-webui -n {{ open5gs_namespace }}
+        -p '{"spec":{"type":"NodePort","ports":[{"name":"http","port":9999,"targetPort":9999,"nodePort":30999,"protocol":"TCP"}]}}'
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+
+    # -------------------------------------------------------------------------
+    # Step 6 — Verify all pods are Ready
+    # -------------------------------------------------------------------------
+    - name: Wait for all Open5GS pods to be Ready
+      command: >
+        kubectl wait pods --all
+        --for=condition=Ready
+        --namespace {{ open5gs_namespace }}
+        --timeout=300s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      retries: 5
+      delay: 30
+      ignore_errors: yes
+
+    - name: Show Open5GS pod status
+      command: "kubectl get pods -n {{ open5gs_namespace }} -o wide"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: pod_status
+
+    - name: Print pod status
+      debug:
+        msg: "{{ pod_status.stdout_lines }}"
+
+    - name: Show Open5GS services
+      command: "kubectl get svc -n {{ open5gs_namespace }}"
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: svc_status
+
+    - name: Print service status
+      debug:
+        msg: "{{ svc_status.stdout_lines }}"

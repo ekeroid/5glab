@@ -1,0 +1,74 @@
+# =============================================================================
+# kube-prometheus-stack values
+# Prometheus + Grafana + node-exporter + kube-state-metrics
+# =============================================================================
+
+grafana:
+  enabled: true
+  adminPassword: "admin5G"
+  service:
+    type: NodePort
+    nodePort: 30300
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki-gateway.monitoring.svc.cluster.local:80
+      access: proxy
+      isDefault: false
+
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    retention: 7d
+    additionalScrapeConfigs:
+      - job_name: open5gs-metrics
+        scrape_interval: 15s
+        metrics_path: /metrics
+        scrape_protocols:
+          - PrometheusText0.0.4
+        fallback_scrape_protocol: PrometheusText0.0.4
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - open5gs
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            regex: metrics
+            action: keep
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: job
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: longhorn
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+  service:
+    type: NodePort
+    nodePort: 30090
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: longhorn
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+nodeExporter:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true

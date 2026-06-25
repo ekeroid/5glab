@@ -1,0 +1,41 @@
+
+
+130.235.32.164    vpn-5g.eit.lth.se
+130.235.32.165    infraserver01-5g.eit.lth.
+130.235.32.166    ul0002-g5.eit.lth.se
+130.235.32.168    core5g001.eit.lth.se
+130.235.32.169    garage-toolserver001.eit.lth.se. (u/pw: garage/garage)
+169.254.2.1
+130.235.32.171    k8sv2-1.eit.lth.se
+130.235.32.172    k8sv2-2.eit.lth.se
+130.235.32.173    k8sv2-3.eit.lth.se
+130.235.32.174    k8sv2-4.eit.lth.se
+130.235.32.175    k8sv2-5.eit.lth.se
+130.235.32.176    k8sv2-6.eit.lth.se
+130.235.32.177    k8sv2-7.eit.lth.se
+130.235.32.181    gpuserver01-5g.eit.lth.se
+
+169.254.2.2       du1 (Ericsson RBS 6651)
+
+tcp_39459
+tcp_39460
+tcp_39461
+udp_39459
+udp_39460
+udp_39461
+
+Till gpuserver01-5g.eit.lth.se (130.235.32.181) 
+och k8sv2-1.eit.lth.se (130.235.32.171) är följande portar öppna 
+för control.lth.se (130.235.83.0/24), eit.lth.se (130.235.200.0/22) och LU:s VPN.
+
+tcp_6443
+udp_6443
+tcp_443
+tcp_80
+icmp
+
+Till allt som sitter i 5g-lab vlan a190-eit-5g är följande portar öppna
+för nästan hela LU.
+
+tcp_22
+tcp_3389
