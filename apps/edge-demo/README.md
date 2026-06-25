@@ -177,20 +177,191 @@ else? **Change the manifest, not the script** (see below).
 
 ---
 
+## The manifest, explained
+
+The **manifest** is the only application-specific data in the whole
+demo. Everything else is API plumbing. Here it is verbatim from
+[`edge_demo.py`](edge_demo.py):
+
+```python
+DEMO_MANIFEST = {
+    "appName": "edge-demo-hello",
+    "appProvider": "edge-demo",
+    "appSoftwareVersion": "1.0.0",
+    "packageType": "CONTAINER",
+    "containerSpec": {
+        "image": "nginxdemos/hello:plain-text",
+        "readinessProbe": {
+            "http": {"path": "/", "port": 80},
+            "initialDelaySeconds": 2,
+            "periodSeconds": 2,
+        },
+    },
+    "requiredResources": {
+        "cpu": "100m",
+        "memory": 64,
+    },
+    "componentSpec": [
+        {
+            "componentName": "web",
+            "networkInterfaces": [
+                {"name": "http", "port": 80, "protocol": "TCP"},
+            ],
+        }
+    ],
+}
+```
+
+This dict becomes the body of `POST /edge-app-management/v0/apps`
+(step 2). The NEF-shim stores it, returns an `appId`, and later
+translates it into a Kubernetes **Deployment + Service** when you
+instantiate it (step 3).
+
+### Top-level fields
+
+| Field | Required | Purpose |
+|---|---|---|
+| `appName` | yes | A human label. Shows up in logs. Two different apps can share a name; they'll get different `appId`s. |
+| `appProvider` | yes | Free-text provider identifier. Useful when many teams share a NEF. |
+| `appSoftwareVersion` | yes | Free-text version. Bump when you change the image. |
+| `packageType` | yes | Always `"CONTAINER"`. The platform supports nothing else (no VMs, no functions). |
+| `containerSpec` | yes | What runs in each pod. See below. |
+| `requiredResources` | yes | CPU / memory / GPU per pod. See below. |
+| `componentSpec` | yes | What ports the container exposes. See below. |
+
+### `containerSpec` — what's inside the pod
+
+| Field | Required | Purpose |
+|---|---|---|
+| `image` | yes | Full image reference, e.g. `nginxdemos/hello:plain-text` or `ghcr.io/you/yourapp:v1.2`. |
+| `imageRegistry` + `imageName` + `imageTag` | alt | Three-field form. Same result; use whichever you find readable. |
+| `imagePullPolicy` | no | `Always` (default) / `IfNotPresent` / `Never`. |
+| `command` | no | List of strings; overrides the image's ENTRYPOINT. Example: `["python", "-m", "http.server", "9000"]`. |
+| `args` | no | List of strings; overrides the image's CMD. |
+| `env` | no | Environment variables. Dict (`{"K": "v"}`) or list (`[{"name":"K","value":"v"}]`). |
+| `readinessProbe` | recommended | The NEF-shim won't return `status=ready` until this passes. See below. |
+| `livenessProbe` | no | k8s restarts the container if this fails too many times. Use a generous `initialDelaySeconds` for slow-starting apps. |
+
+### Probes
+
+Both probes have the same shape:
+
+```python
+"readinessProbe": {
+    "http": {"path": "/health", "port": 8080},   # required
+    "initialDelaySeconds": 2,                    # grace before first probe
+    "periodSeconds": 2,                          # gap between probes
+    "failureThreshold": 3,                       # consecutive misses to fail
+}
+```
+
+- `readinessProbe` answers "can it serve traffic *yet*?" — k8s won't
+  route requests to it until this passes. Step 4 of the demo polls
+  the readiness probe; the pod is considered `ready` when this
+  returns 200.
+- `livenessProbe` answers "is it still working?" — if it fails too
+  many times in a row, k8s kills the container. Useful for catching
+  deadlocked apps. For a slow-starting app (e.g. one that builds a
+  TensorRT engine), set `initialDelaySeconds` long enough that the
+  liveness probe doesn't fire mid-init.
+
+If you omit the readiness probe, the platform will mark the pod
+`ready` as soon as the container starts — which is wrong for most
+real apps.
+
+### `requiredResources`
+
+| Field | Form | Example | Meaning |
+|---|---|---|---|
+| `cpu` | string or int | `"100m"` or `2` | CPU request. `100m` = 0.1 of one core. Whole numbers = whole cores. |
+| `memory` | int (MiB) | `64` | RAM request in MiB. |
+| `gpu` | int | `0` or `1` | Number of GPU slots requested. **One slot is one MPS partition, not a whole physical GPU.** LTH GPUs share 4 ways, Xerces 2 ways. |
+
+Setting `gpu: 1` makes the platform:
+- Schedule onto a GPU-equipped node only
+- Add `runtimeClassName: nvidia` and the `nvidia.com/gpu` resource
+  request
+- Tolerate the `nvidia.com/gpu=true:NoSchedule` taint on GPU nodes
+- Make `nvidia-smi` work inside the container (if the image has
+  CUDA libraries available — `nvcr.io/nvidia/...` and
+  `pytorch/pytorch:*-cuda*` are good starting bases)
+
+### `componentSpec` — your ports
+
+```python
+"componentSpec": [
+    {
+        "componentName": "web",                        # free-text label
+        "networkInterfaces": [
+            {"name": "http",  "port": 80,    "protocol": "TCP"},
+            {"name": "grpc",  "port": 50051, "protocol": "TCP"},
+        ],
+    }
+],
+```
+
+- One `componentSpec` entry per pod-template (we always use one — the
+  spec allows more but the NEF-shim collapses them).
+- Each `networkInterfaces` entry becomes one **NodePort** on the
+  Service. The platform picks a free port in `30000–32767` and tells
+  you about it in step 5.
+- **`name` matters.** It's echoed back in
+  `/endpoints` (step 5), and your client looks it up by name:
+  `endpoints["http"]["url"]`, `endpoints["grpc"]["url"]`. Use names
+  that are stable across deploys.
+- `port` is the port your container actually listens on. The external
+  NodePort is different and unpredictable.
+- `protocol` is `TCP` for everything (the platform supports UDP too
+  but no demo uses it yet).
+
+### What the platform fills in for you
+
+You **don't** specify, and shouldn't:
+
+- The Deployment / Service names — derived from your tenant slug.
+- The namespace — currently fixed to `edgevision`.
+- `replicas` — always 1. Scaling out is not in scope for v0 of the
+  API.
+- The NodePort numbers — picked by Kubernetes, returned in step 5.
+- `imagePullSecrets` — the platform attaches `ghcr-secret`
+  automatically for `ghcr.io` images.
+- Node selection / GPU taint tolerations — added automatically when
+  `gpu >= 1`.
+
+### What's not yet supported in the manifest
+
+| Real k8s feature | Status in v0 of the API |
+|---|---|
+| Volumes / PersistentVolumeClaims | ❌ no — emptyDir for pod lifetime only |
+| ConfigMaps | ❌ no — bake configs into the image or use `env` |
+| Secrets | ❌ no — see above |
+| Multiple containers per pod | ❌ no — one pod = one container |
+| Init containers | ❌ no — use `command` instead |
+| Custom `imagePullSecrets` | ❌ no — only `ghcr-secret` is wired in |
+| Service mesh / sidecars | ❌ no |
+| HorizontalPodAutoscaler | ❌ no — fixed 1 replica |
+| Ingress / TLS | ❌ no — your container is on the public internet via NodePort, run TLS in-pod if you need it |
+
+If any of these are blockers for what you want to build, talk to me
+before you start.
+
+---
+
 ## Prerequisites
 
 You need:
 
-1. **Network reachability to the 5G lab control plane.** Two ways to
-   get this:
-   - Connected through the lab's 5G network (e.g. UE behind a
-     Teltonika CPE — your laptop sees a 10.x.x.x address). **All ports
-     are reachable.**
-   - Connected over the LTH VPN. **Only port 80 is reachable**, which
-     means the **control plane** (this script's API calls) works, but
-     the **data plane** (step 6) **will not reach the LTH zone**. Use
-     `--zone xerces-cloud-zone` instead — Xerces has all ports open to
-     the internet.
+1. **Network reachability to the 5G lab control plane.** Three
+   common cases:
+   - **5G UE** (e.g. laptop behind a Teltonika CPE — you'll see a
+     `10.x.x.x` PDU address). **All ports on both zones are
+     reachable.** This is the canonical client.
+   - **LTH VPN / Eduroam**. The control plane (port 80) works, so
+     CAMARA calls succeed. **LTH NodePorts are blocked by the
+     campus firewall**, so step 6 won't reach LTH-zone pods. Use
+     `--zone xerces-cloud-zone` — Xerces is open on all ports.
+   - **Public internet** (no VPN). The LTH side is unreachable
+     entirely. Use `--zone xerces-cloud-zone`.
 2. **Python 3.9 or newer** and the `requests` library:
    ```sh
    pip install -r requirements.txt
@@ -222,11 +393,14 @@ node-local image cache and finish in ~3 s).
 | `--ready-timeout N`      | Seconds to wait for the pod to become ready. Default 180. Bump for a cold V100 build (which can take ~14 min if the engines aren't cached on the node). |
 | `--keep`                 | Skip teardown — leave the instance running so you can `curl` it yourself afterwards. |
 
-### Example: from outside the 5G network (use Xerces)
+### Example: pick a specific zone
 
 ```sh
 python3 edge_demo.py --zone xerces-cloud-zone
 ```
+
+From a 5G UE either zone works. From the VPN or the public internet,
+use Xerces.
 
 ### Example: DNS not set up
 
@@ -445,12 +619,235 @@ slot, not a full physical GPU.
 
 ---
 
+## Building your own app on the platform
+
+You've read everything above. You understand the lifecycle, the
+manifest, the data plane. Now you want to actually ship something.
+End-to-end, that's three pieces of work:
+
+1. **Build a container image** of your app.
+2. **Push it to a registry the platform can reach.**
+3. **Write a manifest** that points at it, and deploy it.
+
+### Step A — Build your app as a container
+
+Your app needs to listen on TCP ports — that's how the platform
+exposes it. HTTP, gRPC, raw TCP, doesn't matter. Two small examples:
+
+**Minimal Python HTTP server (`Dockerfile`):**
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY server.py .
+EXPOSE 8080
+CMD ["python", "server.py"]
+```
+
+```python
+# server.py
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers()
+        self.wfile.write(b"hello from edge\n")
+HTTPServer(("0.0.0.0", 8080), H).serve_forever()
+```
+
+**FastAPI app (`Dockerfile`):**
+
+```dockerfile
+FROM python:3.12-slim
+RUN pip install fastapi uvicorn
+COPY app.py /
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+```python
+# app.py
+from fastapi import FastAPI
+app = FastAPI()
+@app.get("/health")
+def health(): return {"ok": True}
+@app.get("/")
+def root(): return {"msg": "hello from edge"}
+```
+
+**Things to bake into your image, not the manifest:**
+
+- All Python / system / model dependencies.
+- Configuration that doesn't change between deploys (the manifest
+  has no Secrets or ConfigMaps yet, so put non-secret config in the
+  image and pass small things via `env`).
+- A working `/health` endpoint if you can. Even if it just returns
+  200, it makes the readiness probe trivial.
+
+**Build for the right architecture.** The platform runs `linux/amd64`
+on every node. From an Apple Silicon Mac:
+
+```sh
+docker buildx build --platform linux/amd64 -t myapp:v1 .
+```
+
+### Step B — Push to a registry
+
+Two paths supported today:
+
+**1. Public Docker Hub / public ghcr.io / quay.io — no setup needed.**
+
+```sh
+docker tag myapp:v1 docker.io/myuser/myapp:v1
+docker push docker.io/myuser/myapp:v1
+```
+
+**2. Private ghcr.io — the cluster has a pull secret for `ghcr.io`.**
+
+```sh
+# one-time login
+echo $GITHUB_TOKEN | docker login ghcr.io -u <github-user> --password-stdin
+# push
+docker tag myapp:v1 ghcr.io/<github-user>/myapp:v1
+docker push ghcr.io/<github-user>/myapp:v1
+```
+
+The platform automatically attaches `imagePullSecrets: [ghcr-secret]`
+to every Deployment, so private images on `ghcr.io/ekeroid/...` and
+related orgs pull without further config. Talk to the lab admin if
+you need a new org / token.
+
+Other registries (private Docker Hub, private quay, GitLab registry,
+AWS ECR, etc.) **don't work yet** — there's no way to pass a custom
+pull secret through the API. If you need one, the simplest workaround
+is to push the image to ghcr.io.
+
+### Step C — Adapt the manifest, run the demo
+
+Copy `edge-demo/edge_demo.py` to your own folder and change
+`DEMO_MANIFEST`:
+
+```python
+DEMO_MANIFEST = {
+    "appName": "my-app",
+    "appProvider": "team-x",
+    "appSoftwareVersion": "0.1.0",
+    "packageType": "CONTAINER",
+    "containerSpec": {
+        "image": "ghcr.io/<github-user>/myapp:v1",
+        "readinessProbe": {
+            "http": {"path": "/health", "port": 8080},
+            "initialDelaySeconds": 2,
+            "periodSeconds": 2,
+        },
+        "env": {"LOG_LEVEL": "info"},
+    },
+    "requiredResources": {"cpu": 1, "memory": 512},
+    "componentSpec": [{
+        "componentName": "api",
+        "networkInterfaces": [
+            {"name": "http", "port": 8080, "protocol": "TCP"},
+        ],
+    }],
+}
+```
+
+Then:
+
+```sh
+python3 edge_demo.py
+```
+
+If it fails: see the [Failure modes](#failure-modes-youll-likely-hit)
+table below.
+
+### Step D — Iterate
+
+Once your app deploys at all, the inner loop is:
+
+1. Change code.
+2. Re-build + push: `docker buildx build --platform linux/amd64 --push -t ghcr.io/.../myapp:v2 .`
+3. Bump `imageTag` in the manifest (or use `:latest` and accept the
+   pull-on-every-deploy cost).
+4. Run `edge_demo.py` — it does DELETE + redeploy.
+
+For a GUI / interactive client (like
+[edgevision](../edgevision/)), the same applies but the client lives
+in a long-running GUI app instead of a script. Use `edgevision/` as a
+reference if you're building something more elaborate than a single
+`curl`.
+
+### Step E — Production maturation (later)
+
+When you're past the demo stage:
+
+- Stop hardcoding `:latest`. Use semver tags and bump them.
+- Add a real `/health` that checks downstreams (DB, model server,
+  whatever).
+- Add a `livenessProbe` so a stuck container restarts itself.
+- Surface metrics on a second `networkInterfaces` entry named
+  `metrics` (port 9090, Prometheus convention).
+- Log to stdout in structured JSON. `kubectl logs` is the only way
+  to see them right now; Loki is set up but not yet wired per-app.
+- Pin specific CPU / memory limits, not just requests. The platform
+  doesn't enforce this yet but will eventually.
+- When the warm-cache reaper lands (planned: 1 h grace after DELETE),
+  your engine builds / model loads survive between sessions. Design
+  your startup with that in mind.
+
+### Reference: the EdgeVision manifest as a "real app" example
+
+The YOLOv8 demo's manifest, for comparison — same shape, bigger:
+
+```python
+APP_MANIFEST = {
+    "appName": "edgevision-yolov8",
+    "appProvider": "lth-frtn90",
+    "appSoftwareVersion": "1.0.0",
+    "packageType": "CONTAINER",
+    "containerSpec": {
+        "imageRegistry": "ghcr.io/ekeroid/5glab",
+        "imageName": "edgevision-infer",
+        "imageTag": "latest",
+        "readinessProbe": {
+            "http": {"path": "/health", "port": 8080},
+            "initialDelaySeconds": 30, "periodSeconds": 5,
+        },
+        "livenessProbe": {
+            "http": {"path": "/health", "port": 8080},
+            "initialDelaySeconds": 1200,           # ← V100 takes ~12 min to build TRT engines
+            "periodSeconds": 15, "failureThreshold": 5,
+        },
+    },
+    "requiredResources": {"cpu": 2, "memory": 8192, "gpu": 1},
+    "componentSpec": [{
+        "componentName": "infer",
+        "networkInterfaces": [
+            {"name": "http", "port": 8080,  "protocol": "TCP"},
+            {"name": "grpc", "port": 50051, "protocol": "TCP"},
+        ],
+    }],
+}
+```
+
+Differences worth noting:
+
+- **GPU**: `gpu: 1` triggers the whole NVIDIA-runtime scheduling path.
+- **Long initial liveness delay**: 1200 s instead of the default — the
+  app needs ~12 min on a V100 to build its TensorRT engines on first
+  boot. Without this, the liveness probe would kill the container
+  mid-build.
+- **Two ports** named `http` and `grpc` — the client picks the
+  transport based on which name it looks up.
+- **`imageRegistry` + `imageName` + `imageTag`** split form, same
+  effect as `image: "ghcr.io/ekeroid/5glab/edgevision-infer:latest"`.
+
+---
+
 ## Failure modes you'll likely hit
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Connection timed out` on every request | Not on 5G *and* not on the VPN | Bring one up. `getent hosts camara.5glab.control.lth.se` to verify DNS. |
-| Steps 1–5 OK, step 6 times out | You're on the VPN (only port 80 reachable, NodePorts blocked) | Use `--zone xerces-cloud-zone`, OR connect via the 5G CPE. |
+| `Connection timed out` on every request | Not on 5G *and* not on the LTH VPN | Bring one up. `getent hosts camara.5glab.control.lth.se` to verify DNS. |
+| Steps 1–5 OK, step 6 times out on LTH zone | On VPN: LTH NodePorts blocked by campus firewall | Use `--zone xerces-cloud-zone`, OR connect via the 5G CPE (then both zones work). |
 | `404 App not found` on instantiate | Source IP changed between `POST /apps` and `POST /app-instances` | NAT/VPN flipped mid-flight. Re-run from the same network. |
 | `403 Instance not owned by this tenant` | Same as above | Same fix. |
 | `409 Instance not ready` from `/endpoints` | Polled too early | Wait for `status=ready`. |

@@ -11,6 +11,58 @@ Everything is explained from scratch.
 
 ---
 
+## What can you do with 5G + edge compute?
+
+5G is not just a faster pipe. With a **5G Standalone** network and
+**GPU/CPU servers placed inside the operator's edge** — close to the
+radio masts, not in some hyperscale cloud thousands of kilometres away
+— you get something qualitatively new: **compute that is part of the
+network**. An app can ask the network "where can I run a container
+near this device?" and within seconds have GPU-accelerated code
+running one hop from the UE.
+
+That changes what a device has to carry. Anything that is hard or
+expensive to do on the device — heavy AI inference, video analytics,
+real-time control, multi-device coordination — can be **offloaded**
+to the edge, then accessed over a single-digit-millisecond radio
+link. The result:
+
+- **Devices get lighter and cheaper.** A phone, a sensor, a vehicle
+  doesn't need a top-end GPU; the network provides one on demand.
+- **Battery life stretches.** The heaviest compute happens in a
+  power-cooled data centre, not on a hand-held lithium cell.
+- **Latency drops.** Round-trip to a central cloud is 50–100 ms; to
+  a 5G edge it's 5–15 ms. New workloads become possible — XR,
+  cooperative autonomy, real-time robotic control.
+- **Devices can collaborate** through a shared edge instead of
+  having to mesh with each other directly.
+- **Capability becomes a network service.** A developer asks the
+  network "give me a GPU container near this UE", the network does
+  it. No infrastructure to build, no DevOps team to hire.
+
+The mechanism that makes this *programmable* is **CAMARA** — an
+open-source API standard (Linux Foundation + GSMA) that gives apps
+a uniform way to talk to the network. Discover edge zones, deploy a
+container, get a URL, use it, tear it down. Six HTTP endpoints. The
+same API at every operator that implements it.
+
+This lab is a working end-to-end realisation of that vision:
+
+- A **real 5G SA network** (Ericsson BB6651 gNB + Open5GS core) with
+  test UEs registering, getting IPs and talking to the world.
+- A **CAMARA-compliant edge-compute API** (`nef-shim`) sitting on top
+  of two Kubernetes clusters: one inside the lab (NVIDIA L40S GPUs),
+  one remote (NVIDIA V100 in Ericsson's Xerces cloud).
+- **Real demo applications** showing what the platform is for:
+  a 150-line CAMARA walkthrough, a YOLO object-detection app that
+  offloads inference to the edge over 5G in ~50 ms end-to-end, and
+  a TCP benchmark for measuring exactly where the time goes.
+
+Everything is open and reproducible. The rest of this README walks
+through how it's built.
+
+---
+
 ## What is in this repository
 
 ```
@@ -260,15 +312,14 @@ externally reachable hostname/IP of each zone's cluster.
 
 ### Reachability matrix
 
-This catches people every time:
-
-| You are on … | LTH zone reachable? | Xerces zone reachable? |
+| You are on … | LTH zone | Xerces zone |
 |---|---|---|
-| 5G UE (PDU on `10.45.0.0/16`) | ✅ all ports | ❌ no route |
+| 5G UE (PDU on `10.45.0.0/16`) | ✅ all ports | ✅ all ports |
 | LTH VPN / Eduroam | ✅ port 80 only (control plane) <br>❌ NodePorts blocked by campus firewall | ✅ all ports (OpenStack SG `0.0.0.0/0`) |
 | Public internet | ❌ everything blocked | ✅ all ports |
 
-**Practical: if you're not on 5G, point your client at Xerces.**
+**Practical: a 5G UE can use either zone. From the VPN, use Xerces.
+Other networks: Xerces only.**
 
 ---
 
