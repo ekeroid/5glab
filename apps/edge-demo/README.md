@@ -525,6 +525,10 @@ We use `python3 -m json.tool` to pretty-print and `python3 -c '…'` to
 pluck single fields, so there's no `jq` to install. If you have `jq`
 and prefer it, the equivalents are in a note at the end.
 
+The manifest in step 2 below is **CPU-only** — no `gpu` field, so the
+pod schedules on any worker. For GPU runs see
+[CPU vs GPU](#cpu-vs-gpu) below.
+
 ```sh
 API=http://camara.5glab.control.lth.se
 ```
@@ -692,19 +696,113 @@ change the manifest**. Edit `DEMO_MANIFEST` at the top of
 Step 5 will return three URL entries. The client looks them up by
 name (`endpoints["grpc"]` etc.).
 
-### Request a GPU
+### CPU vs GPU
+
+The default `DEMO_MANIFEST` (and the curl block above) is a **CPU-only
+run** — there's no `gpu` field, so the NEF-shim doesn't request a
+GPU, doesn't pin the pod to a GPU node, and any worker node will do.
+Hello-world / HTTP echo / business-logic containers should stay CPU.
+
+#### CPU run (default)
 
 ```python
-"requiredResources": {"cpu": 4, "memory": 8192, "gpu": 1},
+"requiredResources": {"cpu": "100m", "memory": 64},
+# no "gpu" key — or, equivalently, "gpu": 0
 ```
-The pod is scheduled onto a GPU node with `runtimeClassName: nvidia`
-and one GPU slot. The image needs to be CUDA-aware (e.g.
-`nvcr.io/nvidia/...` or `pytorch/pytorch:*-cuda*`) for the GPU to
-actually be visible inside the container.
 
-**Note:** the LTH zone shares each GPU 4 ways via NVIDIA MPS, and
-Xerces shares each GPU 2 ways. Asking for `gpu: 1` gets you one MPS
-slot, not a full physical GPU.
+What the NEF-shim does:
+
+- Requests `cpu` and `memory` only — no `nvidia.com/gpu`.
+- No node selector — the pod schedules on any worker (incl. cheap
+  non-GPU nodes).
+- No `nvidia.com/gpu` taint toleration is needed.
+
+Same as curl-step 2 above. You can verify after the pod is up:
+
+```sh
+KUBECONFIG=… kubectl -n edgevision describe pod -l tenant=<slug> \
+  | grep -E 'Node:|nvidia.com/gpu|Requests|Limits'
+# → no nvidia.com/gpu lines
+```
+
+#### GPU run
+
+Add `gpu: N` (N = number of MPS slots) **and** use a CUDA-aware image:
+
+```python
+"requiredResources": {"cpu": 2, "memory": 4096, "gpu": 1},
+"containerSpec": {
+    "image": "nvidia/cuda:12.4.1-base-ubuntu22.04",
+    "command": ["bash", "-c", "nvidia-smi && sleep 3600"],
+    "readinessProbe": {
+        "exec": {"command": ["nvidia-smi"]},
+        "initialDelaySeconds": 5, "periodSeconds": 5,
+    },
+},
+```
+
+What the NEF-shim does differently when `gpu >= 1`:
+
+- Adds `nvidia.com/gpu: N` to both `requests` and `limits` so the
+  GPU device plugin advertises the slot.
+- Sets `nodeSelector: nvidia.com/gpu.present=true` — only GPU nodes
+  are eligible.
+- Adds a toleration for the `nvidia.com/gpu:NoSchedule` taint so the
+  pod can actually land on those nodes.
+- The NVIDIA container runtime makes `/dev/nvidia*` and the CUDA
+  libraries visible inside the container; `nvidia-smi` then "just
+  works" if the image has it.
+
+To prove the GPU is really attached, exec into the pod (need cluster
+access — see [Deeper debugging](#failure-modes-youll-likely-hit)):
+
+```sh
+KUBECONFIG=… kubectl -n edgevision exec -it deploy/<slug>-app -- nvidia-smi
+# → table showing L40S (LTH) or Tesla V100 (Xerces)
+```
+
+#### MPS slots, not whole GPUs
+
+`gpu: 1` is **one MPS slot**, not one physical card:
+
+| Zone | Physical GPU | MPS slots per card | Max `gpu:` value |
+|---|---|---|---|
+| `lth-5glab-gpu-zone` | 2× NVIDIA L40S | 4 | 8 across both cards |
+| `xerces-cloud-zone`  | 1× NVIDIA Tesla V100 | 2 | 2 |
+
+Picking the count is workload-dependent: TRT inference happily shares
+a card; a single training job usually wants every slot on one GPU.
+
+#### Picking CPU vs GPU at the curl layer
+
+Same lifecycle, just a different `requiredResources` block in step 2.
+A GPU variant of the register call:
+
+```sh
+curl -sS -X POST "$API/edge-app-management/v0/apps" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "appName": "edge-demo-gpu",
+    "appProvider": "edge-demo",
+    "appSoftwareVersion": "1.0.0",
+    "packageType": "CONTAINER",
+    "containerSpec": {
+      "image": "nvidia/cuda:12.4.1-base-ubuntu22.04",
+      "command": ["bash","-c","nvidia-smi && sleep 3600"],
+      "readinessProbe": {"exec": {"command": ["nvidia-smi"]},
+                         "initialDelaySeconds": 5, "periodSeconds": 5}
+    },
+    "requiredResources": {"cpu": 2, "memory": 4096, "gpu": 1},
+    "componentSpec": [{
+      "componentName": "gpu",
+      "networkInterfaces": [{"name": "http", "port": 80, "protocol": "TCP"}]
+    }]
+  }'
+```
+
+Heads-up: a fresh CUDA image is ~2 GB. Cold pulls on the LTH zone
+take ~30–60 s; on Xerces 2–3 min. Bump `--ready-timeout` (or your
+poll loop) accordingly.
 
 ### Pass environment variables
 
