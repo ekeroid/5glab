@@ -513,48 +513,147 @@ deployment would use OAuth tokens scoped to a customer.
 
 ---
 
-## It really is just HTTP
+## It really is just HTTP — the demo in curl
 
-Same lifecycle from `bash` + `curl` + `jq`, no Python needed:
+`edge_demo.py` doesn't do anything clever. Same lifecycle, one `curl`
+per step, no Python and no extra dependencies. Each block below was
+captured from a real run against the live lab — the JSON shown is
+what actually came back.
+
+Prereqs: `curl` (everywhere) and `python3` (built into macOS / Linux).
+We use `python3 -m json.tool` to pretty-print and `python3 -c '…'` to
+pluck single fields, so there's no `jq` to install. If you have `jq`
+and prefer it, the equivalents are in a note at the end.
 
 ```sh
 API=http://camara.5glab.control.lth.se
+```
 
-# 1. discover
-curl -s $API/simple-edge-discovery/v0/edge-cloud-zones \
-  --get --data-urlencode device-ip=10.45.0.2 | jq
+### 1. Discover zones
 
-# 2. register
-APP=$(curl -s -X POST $API/edge-app-management/v0/apps \
+```sh
+curl -sS "$API/simple-edge-discovery/v0/edge-cloud-zones?device-ip=10.45.0.2" \
+  | python3 -m json.tool
+```
+
+```json
+{
+  "edgeCloudZones": [
+    {"edgeCloudZoneId": "lth-5glab-gpu-zone",
+     "capabilities": {"gpuAvailable": true, "gpuModel": "NVIDIA L40S", "gpuCount": 2, ...}},
+    {"edgeCloudZoneId": "xerces-cloud-zone",
+     "capabilities": {"gpuAvailable": true, "gpuModel": "NVIDIA Tesla V100", "gpuCount": 1, ...}}
+  ]
+}
+```
+
+### 2. Register the manifest → get `appId`
+
+```sh
+APP_ID=$(curl -sS -X POST "$API/edge-app-management/v0/apps" \
   -H 'Content-Type: application/json' \
-  -d '{"appName":"hello",
-       "containerSpec":{"image":"nginxdemos/hello:plain-text",
-         "readinessProbe":{"http":{"path":"/","port":80},
-                           "initialDelaySeconds":2,"periodSeconds":2}},
-       "requiredResources":{"cpu":"100m","memory":64},
-       "componentSpec":[{"componentName":"web",
-         "networkInterfaces":[{"name":"http","port":80,"protocol":"TCP"}]}]}' \
-  | jq -r .appId)
+  -d '{
+    "appName": "edge-demo-hello",
+    "appProvider": "edge-demo",
+    "appSoftwareVersion": "1.0.0",
+    "packageType": "CONTAINER",
+    "containerSpec": {
+      "image": "nginxdemos/hello:plain-text",
+      "readinessProbe": {"http": {"path": "/", "port": 80},
+                         "initialDelaySeconds": 2, "periodSeconds": 2}
+    },
+    "requiredResources": {"cpu": "100m", "memory": 64},
+    "componentSpec": [{
+      "componentName": "web",
+      "networkInterfaces": [{"name": "http", "port": 80, "protocol": "TCP"}]
+    }]
+  }' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["appId"])')
 
-# 3. instantiate
-INST=$(curl -s -X POST $API/edge-app-management/v0/app-instances \
+echo "$APP_ID"   # → e.g. 62f8f09f-e231-4fd9-8ffe-73ceb496cbd4
+```
+
+### 3. Instantiate on a zone → get `appInstanceId`
+
+```sh
+INST_ID=$(curl -sS -X POST "$API/edge-app-management/v0/app-instances" \
   -H 'Content-Type: application/json' \
-  -d "{\"appId\":\"$APP\",\"edgeCloudZoneId\":\"lth-5glab-gpu-zone\"}" \
-  | jq -r .appInstanceId)
+  -d "{\"appId\":\"$APP_ID\",\"edgeCloudZoneId\":\"lth-5glab-gpu-zone\"}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["appInstanceId"])')
 
-# 4. poll
-until curl -s $API/edge-app-management/v0/app-instances/$INST \
-       | jq -e '.status == "ready"' > /dev/null; do sleep 2; done
+echo "$INST_ID"  # → e.g. 96c2a491-4f8a-464b-b286-a977e1ff3233
+```
 
-# 5. endpoints
-URL=$(curl -s "$API/application-endpoint-discovery/v0/endpoints?appInstanceId=$INST" \
+### 4. Poll until ready
+
+```sh
+while :; do
+  RESP=$(curl -sS "$API/edge-app-management/v0/app-instances/$INST_ID")
+  STATUS=$(echo "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+  echo "status=$STATUS"
+  [ "$STATUS" = "ready" ] && break
+  [ "$STATUS" = "failed" ] && { echo "$RESP"; exit 1; }
+  sleep 2
+done
+```
+
+Typical sequence: `instantiating` (phase `pulling` → `starting` →
+`running`) → `ready`. Cold pull on a new image takes a few seconds;
+warm-cache deploys flip to `ready` on the first poll.
+
+### 5. Get the data-plane URL
+
+```sh
+URL=$(curl -sS "$API/application-endpoint-discovery/v0/endpoints?appInstanceId=$INST_ID" \
+  | python3 -c 'import json,sys; print([e["url"] for e in json.load(sys.stdin)["endpoints"] if e["name"]=="http"][0])')
+
+echo "$URL"      # → e.g. http://camara.5glab.control.lth.se:32514
+```
+
+### 6. Talk to the pod directly (data plane, no NEF-shim)
+
+```sh
+curl -sS "$URL/"
+```
+
+```
+Server address: 10.244.225.191:80
+Server name: t-400b6ace-app-75c5f5dc99-tl8vm
+Date: 30/Jun/2026:07:46:11 +0000
+URI: /
+Request ID: 078d4cd944965c071aee45a38ff2ba09
+```
+
+The URL is `<reachable-host>:<NodePort>`, picked by Kubernetes in the
+`30000–32767` range. **This hop only works if your client can reach
+that NodePort.** From a 5G UE both zones are open; from LTH VPN /
+Eduroam only Xerces is open; from the public internet only Xerces.
+See [Prerequisites](#prerequisites) for the full matrix.
+
+### 7. Terminate
+
+```sh
+curl -sS -X DELETE -w 'HTTP %{http_code}\n' \
+  "$API/edge-app-management/v0/app-instances/$INST_ID"
+# → HTTP 204
+```
+
+### Optional: same thing with `jq`
+
+If you have `jq` installed it's slightly terser. Replace the field-
+plucking lines:
+
+```sh
+# step 2
+APP_ID=$(curl -sS -X POST ... | jq -r .appId)
+# step 3
+INST_ID=$(curl -sS -X POST ... | jq -r .appInstanceId)
+# step 4 poll
+until curl -sS "$API/edge-app-management/v0/app-instances/$INST_ID" \
+       | jq -e '.status == "ready"' >/dev/null; do sleep 2; done
+# step 5
+URL=$(curl -sS "$API/application-endpoint-discovery/v0/endpoints?appInstanceId=$INST_ID" \
        | jq -r '.endpoints[] | select(.name=="http") | .url')
-
-# 6. talk to the pod directly
-curl -s $URL/
-
-# 7. teardown
-curl -s -X DELETE $API/edge-app-management/v0/app-instances/$INST
 ```
 
 ---
