@@ -354,8 +354,9 @@ cd apps/edgevision
 ./demo.sh start
 ```
 
-Cold start on L40S: ~4 minutes (TensorRT engine build). Hot path:
-~50 ms end-to-end including the 5G radio.
+Cold start on L40S: currently ~10 minutes (TensorRT engine build).
+This is expected to improve later when boot time / engine caching is
+changed. Hot path: ~50 ms end-to-end including the 5G radio.
 
 Full architecture in
 [`apps/edgevision/HOW-IT-WORKS.md`](apps/edgevision/HOW-IT-WORKS.md).

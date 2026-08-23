@@ -83,11 +83,12 @@ The latency breakdown bar shows:
 | Mode | Startup | Inference | Total | Hardware |
 |------|---------|-----------|-------|----------|
 | Local CPU | instant | ~300ms | ~350ms | Laptop CPU |
-| Edge gRPC | ~26s | ~12-18ms | ~15-25ms | NVIDIA L40S |
-| Edge HTTP | ~26s | ~12-18ms | ~20-35ms | NVIDIA L40S |
+| Edge gRPC | ~10 min | ~12-18ms | ~15-25ms | NVIDIA L40S |
+| Edge HTTP | ~10 min | ~12-18ms | ~20-35ms | NVIDIA L40S |
 
-Startup is ~26s (image pull + Triton model load). No TRT engine build —
-the FP16 engine is pre-built and baked into the container image.
+Startup is currently ~10 minutes because the pod builds TensorRT engines
+on cold boot. We plan to reduce this later with improved boot-time handling
+and/or persistent engine caching.
 
 ## CAMARA API Flow
 
@@ -130,8 +131,8 @@ edgevision/
 │   ├── k8s_manager.py       # K8s resource lifecycle
 │   └── app_management.py    # CAMARA app instance API
 └── triton-infer/            # Inference container (GPU)
-    ├── Dockerfile           # Triton + pre-built TRT engine
-    ├── models/              # YOLOv8n TRT FP16 engine
+    ├── Dockerfile           # Triton runtime + model assets
+    ├── models/              # YOLO model files; TRT engines are built on boot
     └── sidecar/             # gRPC + HTTP inference server
 ```
 
@@ -143,7 +144,9 @@ docker build -t ghcr.io/ekeroid/5glab/edgevision-infer:latest .
 docker push ghcr.io/ekeroid/5glab/edgevision-infer:latest
 ```
 
-The image includes the pre-built TensorRT FP16 engine for L40S GPUs.
+The image does not currently rely on a pre-built TensorRT engine; engines
+are built on pod startup. This is why first EDGE startup is about 10 minutes
+until boot-time caching is improved.
 
 ## Teardown
 
