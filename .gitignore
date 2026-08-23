@@ -4,6 +4,7 @@ edge-infra/kubeconfigs/
 clouds.yaml
 GITHUB_ACCESS_TOKEN
 access-token
+AORTA-ACCESS-TOKEN
 *.key
 *.pem
 .env
